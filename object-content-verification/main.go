@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	OneMBSlice [200]byte
+	OneMBSlice [1000010]byte
 	FinalSlice []byte
 )
 
