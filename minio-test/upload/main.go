@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/minio/minio-go/v7/pkg/encrypt"
 )
 
 func main() {
@@ -25,6 +24,9 @@ func main() {
 	// fmt.Println("File created")
 
 	// uploadFile("BIGFILE", "sveinn", "BIGFILE")
+	// uploadFile("/opt/minio-test/test1", "itest", "test1")
+	uploadFile("/opt/minio-test/test1", "itest", "0cf709d8-8ff7-4b5d-be77-b02d014f963c/4a53622a-9575-4bf9-bcdd-41db83ce9aed/36c0aad0-675f-4a71-81ea-b02d015e8d7d")
+
 	// getattr("sveinn", "BIGFILE")
 	// getattr("sveinn", "F1.txt")
 
@@ -32,7 +34,7 @@ func main() {
 	// getattr("test", "F2.txt")
 
 	// uploadFileSSE("small-file", "sveinn", "small-file")
-	removeFile("sveinn", "small-file")
+	// removeFile("sveinn", "small-file")
 
 	// getattr("minio-go-test-luxpklgrbhjrte6t", "file3")
 	// awsGetAttr("unknown-bucket2", "F1.txt")
@@ -96,21 +98,26 @@ func uploadFileSSE(path, bucket, prefix string) {
 	PR.TotalSize = stat.Size()
 
 	// os.Exit(1)
-	sseOpt := encrypt.DefaultPBKDF([]byte("slkdjfklsd sldkfjlksd flsdfl sjdlf sldf"), []byte(bucket+"/"+prefix)) // replace key
+	// sseOpt := encrypt.DefaultPBKDF([]byte("slkdjfklsd sldkfjlksd flsdfl sjdlf sldf"), []byte(bucket+"/"+prefix)) // replace key
 	// sseOpt, err := encrypt.NewSSEKMS("cli-key", nil)
 	// if err != nil {
 	// 	fmt.Println(err)
 	// 	return
 	// }
 
+	meta := make(map[string]string)
+	meta["Cache-Control"] = "max-age=0, no-cache, no-store"
+	meta["X-Amz-Meta-X-Il-Ctx-Origin-Applicationid"] = "10ff82c3-6816-4785-a27b-ac4e9b51c13a"
+	meta["X-Amz-Meta-X-Il-Ctx-Origin-Componentid"] = "68a275ab-b1cb-4db2-82d7-2d654e75a422"
+
 	fmt.Println("Uploading file", stat.Size())
 	_, err = c.PutObject(context.Background(), bucket, prefix, PR, stat.Size(), minio.PutObjectOptions{
-		ServerSideEncryption: sseOpt,
+		// ServerSideEncryption: sseOpt,
+		// UserMetadata: meta,
+		UserTags:     meta,
 		// DisableMultipart:     false,
 		// DisableContentSha256: true,
-		PartSize:       1024 * 1024 * 5,
-		SendContentMd5: false,
-		ContentType:    "custom/contenttype",
+		ContentType: "application/pdf",
 	})
 	if err != nil {
 		fmt.Println(err)

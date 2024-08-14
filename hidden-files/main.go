@@ -493,4 +493,3 @@ func WIPE(count string) {
 
 	// goto WIPEBLOCK
 }
-

@@ -29,7 +29,6 @@ func main() {
 		}
 		return nil
 	})
-	fmt.Println("vim-go")
 
 	output := make(map[string][]string)
 
