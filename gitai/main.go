@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fatih/color"
@@ -32,6 +33,44 @@ type IssueActivity struct {
 	Repo      string
 	Issue     *github.Issue
 	UpdatedAt time.Time
+}
+
+// Progress tracks API call progress
+type Progress struct {
+	current int
+	total   int
+	mu      sync.Mutex
+}
+
+func (p *Progress) increment() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.current++
+}
+
+func (p *Progress) addToTotal(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.total += n
+}
+
+func (p *Progress) display() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	percentage := float64(p.current) / float64(p.total) * 100
+	bar := "["
+	filled := int(percentage / 2) // 50 chars for 100%
+	for i := 0; i < 50; i++ {
+		if i < filled {
+			bar += "="
+		} else if i == filled {
+			bar += ">"
+		} else {
+			bar += " "
+		}
+	}
+	bar += "]"
+	fmt.Printf("\r%s %d/%d (%.0f%%) ", bar, p.current, p.total, percentage)
 }
 
 // getLabelColor returns a consistent color for a given label
@@ -247,8 +286,15 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	seenPRs := make(map[string]bool)
 	activities := []PRActivity{}
 
+	// Initialize progress tracker
+	// Estimate: 1 rate limit check + 7 PR searches + 3 event pages + 5 issue searches = 16 API calls minimum
+	progress := &Progress{current: 0, total: 16}
+
 	if debugMode {
 		fmt.Println("Running optimized search queries...")
+	} else {
+		fmt.Print("Fetching data from GitHub... ")
+		progress.display()
 	}
 
 	// Calculate dates
@@ -280,34 +326,34 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// 1. PRs authored by the user
 	searchQuery := buildQuery(fmt.Sprintf("is:pr author:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Authored", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Authored", seenPRs, activities, debugMode, progress)
 
 	// 2. PRs where user is mentioned
 	searchQuery = buildQuery(fmt.Sprintf("is:pr mentions:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Mentioned", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Mentioned", seenPRs, activities, debugMode, progress)
 
 	// 3. PRs where user is assigned
 	searchQuery = buildQuery(fmt.Sprintf("is:pr assignee:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Assigned", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Assigned", seenPRs, activities, debugMode, progress)
 
 	// 4. PRs where user commented
 	searchQuery = buildQuery(fmt.Sprintf("is:pr commenter:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Commented", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Commented", seenPRs, activities, debugMode, progress)
 
 	// 5. PRs where user reviewed
 	searchQuery = buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Reviewed", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Reviewed", seenPRs, activities, debugMode, progress)
 
 	// 6. PRs where user is requested for review
 	searchQuery = buildQuery(fmt.Sprintf("is:pr review-requested:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Review Requested", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Review Requested", seenPRs, activities, debugMode, progress)
 
 	// 7. Main query as catch-all for any other involvement
 	searchQuery = buildQuery(fmt.Sprintf("is:pr involves:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Involved", seenPRs, activities, debugMode)
+	activities = collectSearchResults(ctx, client, searchQuery, "Involved", seenPRs, activities, debugMode, progress)
 
 	// 8. Check user's recent activity events to catch any missed PR interactions
-	activities = collectActivityFromEvents(ctx, client, username, seenPRs, activities, debugMode)
+	activities = collectActivityFromEvents(ctx, client, username, seenPRs, activities, debugMode, progress)
 
 	// Now collect issues
 	if debugMode {
@@ -318,11 +364,11 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	issueActivities := []IssueActivity{}
 
 	// Use GitHub's search API to find all issues involving the user
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored", seenIssues, issueActivities, debugMode)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned", seenIssues, issueActivities, debugMode)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned", seenIssues, issueActivities, debugMode)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented", seenIssues, issueActivities, debugMode)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved", seenIssues, issueActivities, debugMode)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored", seenIssues, issueActivities, debugMode, progress)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned", seenIssues, issueActivities, debugMode, progress)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned", seenIssues, issueActivities, debugMode, progress)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented", seenIssues, issueActivities, debugMode, progress)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved", seenIssues, issueActivities, debugMode, progress)
 
 	// Link issues to PRs based on actual cross-references
 	// Only link if: PR mentions issue OR issue mentions PR
@@ -330,6 +376,26 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	if debugMode {
 		fmt.Println("Checking cross-references between PRs and issues...")
 	}
+
+	// Calculate number of cross-reference checks needed (issues x matching PRs in same repo)
+	crossRefChecks := 0
+	for j := range issueActivities {
+		issue := &issueActivities[j]
+		for i := range activities {
+			pr := &activities[i]
+			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
+				crossRefChecks++
+			}
+		}
+	}
+
+	// Update progress total to include cross-reference checks
+	// Each check may do up to 2 API calls (PR comments + issue comments)
+	progress.addToTotal(crossRefChecks * 2)
+	if !debugMode {
+		progress.display()
+	}
+
 	linkedIssues := make(map[string]bool) // Track which issues are linked to at least one PR
 
 	for j := range issueActivities {
@@ -340,7 +406,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 			pr := &activities[i]
 			// Only check PRs in the same repo and same owner
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
-				if areCrossReferenced(ctx, client, pr, issue, debugMode) {
+				if areCrossReferenced(ctx, client, pr, issue, debugMode, progress) {
 					pr.Issues = append(pr.Issues, *issue)
 					linkedIssues[issueKey] = true
 					if debugMode {
@@ -368,6 +434,9 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		fmt.Printf("Total fetch time: %v\n", duration.Round(time.Millisecond))
 		fmt.Printf("Found %d unique PRs and %d unique issues\n", len(activities), len(issueActivities))
 		fmt.Println()
+	} else {
+		// Clear progress bar and add newline
+		fmt.Print("\r" + strings.Repeat(" ", 80) + "\r")
 	}
 
 	if len(activities) == 0 && len(standaloneIssues) == 0 {
@@ -480,7 +549,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	}
 }
 
-func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool) bool {
+func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity, debugMode bool, progress *Progress) bool {
 	prNumber := pr.PR.GetNumber()
 	issueNumber := issue.Issue.GetNumber()
 
@@ -506,6 +575,13 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	prComments, _, err := client.Issues.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.IssueListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	})
+
+	// Increment progress after API call
+	progress.increment()
+	if !debugMode {
+		progress.display()
+	}
+
 	if err == nil {
 		for _, comment := range prComments {
 			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
@@ -518,6 +594,13 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	issueComments, _, err := client.Issues.ListComments(ctx, issue.Owner, issue.Repo, issueNumber, &github.IssueListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	})
+
+	// Increment progress after API call
+	progress.increment()
+	if !debugMode {
+		progress.display()
+	}
+
 	if err == nil {
 		for _, comment := range issueComments {
 			if mentionsNumber(comment.GetBody(), prNumber, issue.Owner, issue.Repo) {
@@ -574,7 +657,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity, debugMode bool) []PRActivity {
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -589,6 +672,13 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 			fmt.Printf("  [Events] Fetching page %d...\n", page+1)
 		}
 		events, resp, err := client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
+
+		// Increment progress after API call
+		progress.increment()
+		if !debugMode {
+			progress.display()
+		}
+
 		if err != nil {
 			fmt.Printf("Error fetching user events: %v\n", err)
 			break
@@ -675,7 +765,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, activities []PRActivity, debugMode bool) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -689,6 +779,13 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			fmt.Printf("  [%s] Searching page %d...\n", label, page)
 		}
 		result, resp, err := client.Search.Issues(ctx, query, opts)
+
+		// Increment progress after API call
+		progress.increment()
+		if !debugMode {
+			progress.display()
+		}
+
 		if err != nil {
 			fmt.Printf("Error searching '%s': %v\n", query, err)
 			if resp != nil {
@@ -813,7 +910,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	)
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, issueActivities []IssueActivity, debugMode bool) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, issueActivities []IssueActivity, debugMode bool, progress *Progress) []IssueActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -827,6 +924,13 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			fmt.Printf("  [%s] Searching page %d...\n", label, page)
 		}
 		result, resp, err := client.Search.Issues(ctx, query, opts)
+
+		// Increment progress after API call
+		progress.increment()
+		if !debugMode {
+			progress.display()
+		}
+
 		if err != nil {
 			fmt.Printf("Error searching '%s': %v\n", query, err)
 			if resp != nil {
