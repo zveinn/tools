@@ -393,12 +393,14 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// Update progress total to include cross-reference checks
 	// Each check may do up to 2 API calls (PR comments + issue comments)
-	progress.addToTotal(crossRefChecks * 2)
+	progress.addToTotal(crossRefChecks)
 	if !debugMode {
 		progress.display()
 	}
 
 	linkedIssues := make(map[string]bool) // Track which issues are linked to at least one PR
+
+	var wg sync.WaitGroup
 
 	for j := range issueActivities {
 		issue := &issueActivities[j]
@@ -408,18 +410,22 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 			pr := &activities[i]
 			// Only check PRs in the same repo and same owner
 			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
-				if areCrossReferenced(ctx, client, pr, issue, debugMode, progress) {
-					pr.Issues = append(pr.Issues, *issue)
-					linkedIssues[issueKey] = true
-					if debugMode {
-						fmt.Printf("  Linked %s/%s#%d <-> %s/%s#%d\n",
-							pr.Owner, pr.Repo, pr.PR.GetNumber(),
-							issue.Owner, issue.Repo, issue.Issue.GetNumber())
+				wg.Go(func() {
+					if areCrossReferenced(ctx, client, pr, issue, debugMode, progress) {
+						pr.Issues = append(pr.Issues, *issue)
+						linkedIssues[issueKey] = true
+						if debugMode {
+							fmt.Printf("  Linked %s/%s#%d <-> %s/%s#%d\n",
+								pr.Owner, pr.Repo, pr.PR.GetNumber(),
+								issue.Owner, issue.Repo, issue.Issue.GetNumber())
+						}
 					}
-				}
+				})
 			}
 		}
 	}
+
+	wg.Wait()
 
 	// Collect standalone issues (not linked to any PR)
 	standaloneIssues := []IssueActivity{}
@@ -574,7 +580,7 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	}
 
 	// Check PR comments for issue mentions
-	prComments, _, err := client.Issues.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.IssueListCommentsOptions{
+	prComments, _, err := client.PullRequests.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.PullRequestListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	})
 
@@ -587,25 +593,6 @@ func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivi
 	if err == nil {
 		for _, comment := range prComments {
 			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
-				return true
-			}
-		}
-	}
-
-	// Check issue comments for PR mentions
-	issueComments, _, err := client.Issues.ListComments(ctx, issue.Owner, issue.Repo, issueNumber, &github.IssueListCommentsOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
-	})
-
-	// Increment progress after API call
-	progress.increment()
-	if !debugMode {
-		progress.display()
-	}
-
-	if err == nil {
-		for _, comment := range issueComments {
-			if mentionsNumber(comment.GetBody(), prNumber, issue.Owner, issue.Repo) {
 				return true
 			}
 		}
