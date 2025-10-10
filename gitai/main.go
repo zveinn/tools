@@ -348,10 +348,35 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool) {
 		return standaloneIssues[i].UpdatedAt.After(standaloneIssues[j].UpdatedAt)
 	})
 
-	// Display sorted activities
-	if len(activities) > 0 {
-		fmt.Println("Pull Requests:")
-		for _, activity := range activities {
+	// Separate open and closed/merged PRs
+	var openPRs, closedPRs, mergedPRs []PRActivity
+	for _, activity := range activities {
+		if activity.PR.State != nil && *activity.PR.State == "closed" {
+			if activity.PR.Merged != nil && *activity.PR.Merged {
+				mergedPRs = append(mergedPRs, activity)
+			} else {
+				closedPRs = append(closedPRs, activity)
+			}
+		} else {
+			openPRs = append(openPRs, activity)
+		}
+	}
+
+	// Separate open and closed issues
+	var openIssues, closedIssues []IssueActivity
+	for _, issue := range standaloneIssues {
+		if issue.Issue.State != nil && *issue.Issue.State == "closed" {
+			closedIssues = append(closedIssues, issue)
+		} else {
+			openIssues = append(openIssues, issue)
+		}
+	}
+
+	// Display open PRs
+	if len(openPRs) > 0 {
+		fmt.Println("Open Pull Requests:")
+		fmt.Println("------------------------------------------")
+		for _, activity := range openPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
 			// Display related issues under the PR
 			if len(activity.Issues) > 0 {
@@ -362,11 +387,54 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool) {
 		}
 	}
 
-	// Display standalone issues
-	if len(standaloneIssues) > 0 {
+	// Display merged PRs
+	if len(mergedPRs) > 0 {
 		fmt.Println()
-		fmt.Println("Issues (standalone):")
-		for _, issue := range standaloneIssues {
+		fmt.Println("Merged Pull Requests:")
+		fmt.Println("------------------------------------------")
+		for _, activity := range mergedPRs {
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			// Display related issues under the PR
+			if len(activity.Issues) > 0 {
+				for _, issue := range activity.Issues {
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+				}
+			}
+		}
+	}
+
+	// Display closed PRs
+	if len(closedPRs) > 0 {
+		fmt.Println()
+		fmt.Println("Closed Pull Requests:")
+		fmt.Println("------------------------------------------")
+		for _, activity := range closedPRs {
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			// Display related issues under the PR
+			if len(activity.Issues) > 0 {
+				for _, issue := range activity.Issues {
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+				}
+			}
+		}
+	}
+
+	// Display open standalone issues
+	if len(openIssues) > 0 {
+		fmt.Println()
+		fmt.Println("Open Issues:")
+		fmt.Println("------------------------------------------")
+		for _, issue := range openIssues {
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+		}
+	}
+
+	// Display closed standalone issues
+	if len(closedIssues) > 0 {
+		fmt.Println()
+		fmt.Println("Closed Issues:")
+		fmt.Println("------------------------------------------")
+		for _, issue := range closedIssues {
 			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
 		}
 	}
@@ -653,19 +721,8 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(pr.User.GetLogin())
 
-	// Add state indicator
-	stateStr := ""
-	if pr.State != nil && *pr.State == "closed" {
-		if pr.Merged != nil && *pr.Merged {
-			stateStr = color.New(color.FgMagenta).Sprint("MERGED ")
-		} else {
-			stateStr = color.New(color.FgRed).Sprint("CLOSED ")
-		}
-	}
-
-	fmt.Printf("%s %s%s %s %s/%s#%d - %s\n",
+	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
 		dateStr,
-		stateStr,
 		labelColor.Sprint(label),
 		userColor.Sprint(pr.User.GetLogin()),
 		owner, repo, *pr.Number,
@@ -682,22 +739,15 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 
 	indent := ""
 	if indented {
-		indent = "-- "
+		indent = "-- [issue] "
 	}
 
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(issue.User.GetLogin())
 
-	// Add state indicator
-	stateStr := ""
-	if issue.State != nil && *issue.State == "closed" {
-		stateStr = color.New(color.FgRed).Sprint("[CLOSED] ")
-	}
-
-	fmt.Printf("%s%s %s%s %s %s/%s#%d - %s\n",
+	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
 		indent,
 		dateStr,
-		stateStr,
 		labelColor.Sprint(label),
 		userColor.Sprint(issue.User.GetLogin()),
 		owner, repo, *issue.Number,
