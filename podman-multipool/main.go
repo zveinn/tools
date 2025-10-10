@@ -15,6 +15,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -48,12 +49,18 @@ const (
 
 // Config holds the configuration for the MinIO cluster
 type Config struct {
-	MinIOImage        string
-	MinIORootUser     string
-	MinIORootPassword string
-	BaseDataDir       string
-	EOSDir            string
-	UseLocalBinary    bool
+	MinIOImage            string
+	MinIORootUser         string
+	MinIORootPassword     string
+	BaseDataDir           string
+	EOSDir                string
+	UseLocalBinary        bool
+	NumPools              int
+	NodesPerPool          int
+	DrivesPerNode         int
+	NetworkName           string
+	ErasureSetDriveCount  string
+	StorageClassStandard  string
 }
 
 // MinIOCluster manages the MinIO multi-pool setup
@@ -62,17 +69,19 @@ type MinIOCluster struct {
 	mu     sync.Mutex
 }
 
-// NewMinIOCluster creates a new MinIOCluster instance
-func NewMinIOCluster() *MinIOCluster {
-	config := Config{
-		MinIOImage:        getEnv("MINIO_IMAGE", "quay.io/minio/minio:latest"),
-		MinIORootUser:     getEnv("MINIO_ROOT_USER", "minioadmin"),
-		MinIORootPassword: getEnv("MINIO_ROOT_PASSWORD", "minioadmin123"),
-		BaseDataDir:       getEnv("BASE_DATA_DIR", "/tmp/minio-pools"),
-		EOSDir:            "/home/sveinn/code/eos-fork",
-		UseLocalBinary:    getEnv("USE_LOCAL_BINARY", "true") == "true",
-	}
+// NewMinIOCluster creates a new MinIOCluster instance with the given config
+func NewMinIOCluster(config Config) *MinIOCluster {
 	return &MinIOCluster{config: config}
+}
+
+// getTotalNodes returns the total number of nodes in the cluster
+func (c *MinIOCluster) getTotalNodes() int {
+	return c.config.NumPools * c.config.NodesPerPool
+}
+
+// getTotalDrives returns the total number of drives in the cluster
+func (c *MinIOCluster) getTotalDrives() int {
+	return c.getTotalNodes() * c.config.DrivesPerNode
 }
 
 // Helper functions for colored output
@@ -126,17 +135,17 @@ func runCommandSilent(command string, args ...string) {
 // createNetwork creates the podman network if it doesn't exist
 func (c *MinIOCluster) createNetwork() error {
 	// podman network exists returns exit code 0 if network exists, non-zero if not
-	_, err := runCommand("podman", "network", "exists", NetworkName)
+	_, err := runCommand("podman", "network", "exists", c.config.NetworkName)
 	if err != nil {
 		// Network doesn't exist, create it
-		logInfo(fmt.Sprintf("Creating Podman network: %s", NetworkName))
-		if _, err := runCommand("podman", "network", "create", NetworkName); err != nil {
+		logInfo(fmt.Sprintf("Creating Podman network: %s", c.config.NetworkName))
+		if _, err := runCommand("podman", "network", "create", c.config.NetworkName); err != nil {
 			logError("Failed to create network: " + err.Error())
 			return fmt.Errorf("failed to create network: %w", err)
 		}
 	} else {
 		// Network already exists
-		logInfo(fmt.Sprintf("Network %s already exists", NetworkName))
+		logInfo(fmt.Sprintf("Network %s already exists", c.config.NetworkName))
 	}
 	return nil
 }
@@ -144,9 +153,9 @@ func (c *MinIOCluster) createNetwork() error {
 // createDataDirectories creates all required data directories
 func (c *MinIOCluster) createDataDirectories() error {
 	logInfo("Creating data directories...")
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
-			for drive := 1; drive <= DrivesPerNode; drive++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
+			for drive := 1; drive <= c.config.DrivesPerNode; drive++ {
 				dir := filepath.Join(c.config.BaseDataDir,
 					fmt.Sprintf("pool%d", pool),
 					fmt.Sprintf("node%d", node),
@@ -164,9 +173,9 @@ func (c *MinIOCluster) createDataDirectories() error {
 // generateServerCommand generates the MinIO server command with all pools
 func (c *MinIOCluster) generateServerCommand() string {
 	var pools []string
-	for pool := 1; pool <= NumPools; pool++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
 		pools = append(pools, fmt.Sprintf("http://minio-pool%d-node{1...%d}:9000/data/drive{1...%d}",
-			pool, NodesPerPool, DrivesPerNode))
+			pool, c.config.NodesPerPool, c.config.DrivesPerNode))
 	}
 	return strings.Join(pools, " ")
 }
@@ -181,7 +190,7 @@ func (c *MinIOCluster) startMinIONode(pool, node int) error {
 
 	// Build volume mounts
 	var volumeMounts []string
-	for drive := 1; drive <= DrivesPerNode; drive++ {
+	for drive := 1; drive <= c.config.DrivesPerNode; drive++ {
 		hostPath := filepath.Join(c.config.BaseDataDir,
 			fmt.Sprintf("pool%d", pool),
 			fmt.Sprintf("node%d", node),
@@ -202,7 +211,7 @@ func (c *MinIOCluster) startMinIONode(pool, node int) error {
 		"run", "-d",
 		"--name", containerName,
 		"--hostname", containerName,
-		"--network", NetworkName,
+		"--network", c.config.NetworkName,
 		"-p", fmt.Sprintf("%d:9000", apiPort),
 		"-p", fmt.Sprintf("%d:9001", consolePort),
 		"-e", fmt.Sprintf("MINIO_ROOT_USER=%s", c.config.MinIORootUser),
@@ -210,8 +219,8 @@ func (c *MinIOCluster) startMinIONode(pool, node int) error {
 		"-e", "MINIO_PROMETHEUS_AUTH_TYPE=public",
 		"-e", "MINIO_CI_CD=on",
 		"-e", "MINIO_PROMETHEUS_URL=http://prometheus:9090",
-		"-e", "MINIO_ERASURE_SET_DRIVE_COUNT=8",
-		"-e", "MINIO_STORAGE_CLASS_STANDARD=EC:3",
+		"-e", fmt.Sprintf("MINIO_ERASURE_SET_DRIVE_COUNT=%s", c.config.ErasureSetDriveCount),
+		"-e", fmt.Sprintf("MINIO_STORAGE_CLASS_STANDARD=%s", c.config.StorageClassStandard),
 	}
 
 	args = append(args, volumeMounts...)
@@ -248,8 +257,8 @@ func (c *MinIOCluster) waitForHealth() error {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		allHealthy := true
 
-		for pool := 1; pool <= NumPools; pool++ {
-			for node := 1; node <= NodesPerPool; node++ {
+		for pool := 1; pool <= c.config.NumPools; pool++ {
+			for node := 1; node <= c.config.NodesPerPool; node++ {
 				apiPort := getAPIPort(pool, node)
 				url := fmt.Sprintf("http://localhost:%d/minio/health/live", apiPort)
 
@@ -288,8 +297,8 @@ func (c *MinIOCluster) cleanup() error {
 	logWarn("Cleaning up existing MinIO containers and volumes...")
 
 	// Stop and remove containers
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
 			containerName := getContainerName(pool, node)
 
 			// Check if container exists
@@ -325,27 +334,35 @@ func (c *MinIOCluster) cleanup() error {
 // stopAll stops all containers
 func (c *MinIOCluster) stopAll() {
 	logInfo("Stopping all MinIO containers...")
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
-			containerName := getContainerName(pool, node)
-			if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) == "" {
-				logInfo(fmt.Sprintf("Stopping %s", containerName))
-				runCommandSilent("podman", "stop", containerName)
-			}
+	wg := new(sync.WaitGroup)
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				containerName := getContainerName(pool, node)
+				if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) == "" {
+					logInfo(fmt.Sprintf("Stopping %s", containerName))
+					runCommandSilent("podman", "stop", containerName)
+				}
+			}()
 		}
 	}
+	wg.Wait()
 }
 
 // startAll starts all existing containers
 func (c *MinIOCluster) startAll() error {
 	logInfo("Starting all MinIO containers...")
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
-			containerName := getContainerName(pool, node)
-			if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) == "" {
-				logInfo(fmt.Sprintf("Starting %s", containerName))
-				runCommandSilent("podman", "start", containerName)
-			}
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
+			go func() {
+				containerName := getContainerName(pool, node)
+				if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) == "" {
+					logInfo(fmt.Sprintf("Starting %s", containerName))
+					runCommandSilent("podman", "start", containerName)
+				}
+			}()
 		}
 	}
 	return c.waitForHealth()
@@ -358,9 +375,9 @@ func (c *MinIOCluster) showStatus() {
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	for pool := 1; pool <= NumPools; pool++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
 		fmt.Printf("Pool %d:\n", pool)
-		for node := 1; node <= NodesPerPool; node++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
 			containerName := getContainerName(pool, node)
 			apiPort := getAPIPort(pool, node)
 
@@ -424,8 +441,8 @@ func (c *MinIOCluster) showAllLogs() error {
 
 	var wg sync.WaitGroup
 
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
 			containerName := getContainerName(pool, node)
 
 			if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) != "" {
@@ -482,9 +499,9 @@ func (c *MinIOCluster) showAllLogsTail(lines int) {
 	logInfo(fmt.Sprintf("Showing last %d lines from all nodes...", lines))
 	fmt.Println()
 
-	for pool := 1; pool <= NumPools; pool++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
 		fmt.Printf("================== Pool %d ==================\n", pool)
-		for node := 1; node <= NodesPerPool; node++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
 			containerName := getContainerName(pool, node)
 
 			if output, _ := runCommand("podman", "container", "exists", containerName); strings.TrimSpace(output) == "" {
@@ -510,9 +527,9 @@ func (c *MinIOCluster) displayInfo() {
 	fmt.Println("Node Access Points:")
 	fmt.Println()
 
-	for pool := 1; pool <= NumPools; pool++ {
+	for pool := 1; pool <= c.config.NumPools; pool++ {
 		fmt.Printf("Pool %d:\n", pool)
-		for node := 1; node <= NodesPerPool; node++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
 			apiPort := getAPIPort(pool, node)
 			consolePort := getConsolePort(pool, node)
 			fmt.Printf("  Node %d:\n", node)
@@ -562,11 +579,9 @@ func (c *MinIOCluster) start() error {
 	}
 
 	// Start all nodes
-	for pool := 1; pool <= NumPools; pool++ {
-		for node := 1; node <= NodesPerPool; node++ {
-			if err := c.startMinIONode(pool, node); err != nil {
-				return err
-			}
+	for pool := 1; pool <= c.config.NumPools; pool++ {
+		for node := 1; node <= c.config.NodesPerPool; node++ {
+			go c.startMinIONode(pool, node)
 		}
 	}
 
@@ -600,7 +615,7 @@ func (c *MinIOCluster) restart() error {
 func printUsage() {
 	fmt.Println("MinIO Multi-Pool Podman Management Tool")
 	fmt.Println()
-	fmt.Println("Usage: multi-pool-podman {start|stop|restart|status|cleanup|reset|logs}")
+	fmt.Println("Usage: podman-multipool [flags] <command> [command-args]")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  start    - Start all MinIO pools and nodes")
@@ -616,29 +631,109 @@ func printUsage() {
 	fmt.Println("  logs tail [N]     - Show last N lines from all nodes (default: 50)")
 	fmt.Println("  logs <pool> <node> - Follow specific node logs (e.g., logs 1 1)")
 	fmt.Println()
-	fmt.Println("Environment Variables:")
-	fmt.Println("  MINIO_ROOT_USER     - MinIO admin username (default: minioadmin)")
-	fmt.Println("  MINIO_ROOT_PASSWORD - MinIO admin password (default: minioadmin123)")
-	fmt.Println("  BASE_DATA_DIR       - Base directory for data (default: /tmp/minio-pools)")
-	fmt.Println("  USE_LOCAL_BINARY    - Use local MinIO binary from EOS directory (default: true)")
+	fmt.Println("Global Flags:")
+	fmt.Println("  -image string")
+	fmt.Println("        MinIO container image to use (default: quay.io/minio/minio:latest)")
+	fmt.Println("  -user string")
+	fmt.Println("        MinIO admin username (default: minioadmin)")
+	fmt.Println("  -password string")
+	fmt.Println("        MinIO admin password (default: minioadmin)")
+	fmt.Println("  -data-dir string")
+	fmt.Println("        Base directory for data storage (default: /tmp/minio-pools)")
+	fmt.Println("  -eos-dir string")
+	fmt.Println("        Path to EOS/MinIO source directory (default: /home/sveinn/code/eos-fork)")
+	fmt.Println("  -local-binary")
+	fmt.Println("        Use local MinIO binary from EOS directory (default: true)")
+	fmt.Println("  -pools int")
+	fmt.Println("        Number of pools in the cluster (default: 4)")
+	fmt.Println("  -nodes-per-pool int")
+	fmt.Println("        Number of nodes per pool (default: 4)")
+	fmt.Println("  -drives-per-node int")
+	fmt.Println("        Number of drives per node (default: 8)")
+	fmt.Println("  -network string")
+	fmt.Println("        Podman network name (default: minio-network)")
+	fmt.Println("  -erasure-set-drive-count string")
+	fmt.Println("        MinIO erasure set drive count (default: 8)")
+	fmt.Println("  -storage-class string")
+	fmt.Println("        MinIO storage class standard (default: EC:3)")
+	fmt.Println("  -help")
+	fmt.Println("        Show this help message")
 	fmt.Println()
-	fmt.Println("Configuration:")
+	fmt.Println("Default Configuration:")
 	fmt.Printf("  Pools: %d\n", NumPools)
 	fmt.Printf("  Nodes per pool: %d\n", NodesPerPool)
 	fmt.Printf("  Drives per node: %d\n", DrivesPerNode)
 	fmt.Printf("  Total nodes: %d\n", TotalNodes)
 	fmt.Printf("  Total drives: %d\n", TotalDrives)
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  podman-multipool start")
+	fmt.Println("  podman-multipool -user admin -password secret123 start")
+	fmt.Println("  podman-multipool -data-dir /var/lib/minio -local-binary=false start")
+	fmt.Println("  podman-multipool -pools 2 -nodes-per-pool 3 -drives-per-node 4 start")
+	fmt.Println("  podman-multipool -erasure-set-drive-count 4 -storage-class EC:2 start")
+	fmt.Println("  podman-multipool logs all")
+	fmt.Println("  podman-multipool logs 1 1")
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	// Define global flags
+	var (
+		minioImage           = flag.String("image", getEnv("MINIO_IMAGE", "quay.io/minio/minio:latest"), "MinIO container image to use")
+		minioUser            = flag.String("user", getEnv("MINIO_ROOT_USER", "minioadmin"), "MinIO admin username")
+		minioPassword        = flag.String("password", getEnv("MINIO_ROOT_PASSWORD", "minioadmin"), "MinIO admin password")
+		baseDataDir          = flag.String("data-dir", getEnv("BASE_DATA_DIR", "/tmp/minio-pools"), "Base directory for data storage")
+		eosDir               = flag.String("eos-dir", getEnv("EOS_DIR", "/home/sveinn/code/eos-fork"), "Path to EOS/MinIO source directory")
+		useLocalBinary       = flag.Bool("local-binary", getEnv("USE_LOCAL_BINARY", "true") == "true", "Use local MinIO binary from EOS directory")
+		numPools             = flag.Int("pools", NumPools, "Number of pools in the cluster")
+		nodesPerPool         = flag.Int("nodes-per-pool", NodesPerPool, "Number of nodes per pool")
+		drivesPerNode        = flag.Int("drives-per-node", DrivesPerNode, "Number of drives per node")
+		networkName          = flag.String("network", getEnv("NETWORK_NAME", NetworkName), "Podman network name")
+		erasureSetDriveCount = flag.String("erasure-set-drive-count", getEnv("MINIO_ERASURE_SET_DRIVE_COUNT", "8"), "MinIO erasure set drive count")
+		storageClassStandard = flag.String("storage-class", getEnv("MINIO_STORAGE_CLASS_STANDARD", "EC:3"), "MinIO storage class standard")
+		showHelp             = flag.Bool("help", false, "Show help message")
+	)
+
+	// Custom usage function
+	flag.Usage = printUsage
+
+	// Parse flags
+	flag.Parse()
+
+	// Show help if requested
+	if *showHelp {
+		printUsage()
+		os.Exit(0)
+	}
+
+	// Get command (first non-flag argument)
+	args := flag.Args()
+	if len(args) < 1 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	cluster := NewMinIOCluster()
+	// Create config from flags
+	config := Config{
+		MinIOImage:           *minioImage,
+		MinIORootUser:        *minioUser,
+		MinIORootPassword:    *minioPassword,
+		BaseDataDir:          *baseDataDir,
+		EOSDir:               *eosDir,
+		UseLocalBinary:       *useLocalBinary,
+		NumPools:             *numPools,
+		NodesPerPool:         *nodesPerPool,
+		DrivesPerNode:        *drivesPerNode,
+		NetworkName:          *networkName,
+		ErasureSetDriveCount: *erasureSetDriveCount,
+		StorageClassStandard: *storageClassStandard,
+	}
 
-	switch os.Args[1] {
+	cluster := NewMinIOCluster(config)
+
+	command := args[0]
+
+	switch command {
 	case "start":
 		if err := cluster.start(); err != nil {
 			os.Exit(1)
@@ -666,7 +761,7 @@ func main() {
 		}
 
 	case "logs":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Error: logs command requires additional arguments")
 			fmt.Println()
 			fmt.Println("Usage:")
@@ -675,13 +770,13 @@ func main() {
 			fmt.Println("  logs <pool> <node>    - Follow specific node logs")
 			fmt.Println()
 			fmt.Println("Examples:")
-			fmt.Println("  multi-pool-podman logs all")
-			fmt.Println("  multi-pool-podman logs tail 100")
-			fmt.Println("  multi-pool-podman logs 1 1")
+			fmt.Println("  podman-multipool logs all")
+			fmt.Println("  podman-multipool logs tail 100")
+			fmt.Println("  podman-multipool logs 1 1")
 			os.Exit(1)
 		}
 
-		switch os.Args[2] {
+		switch args[1] {
 		case "all":
 			if err := cluster.showAllLogs(); err != nil {
 				os.Exit(1)
@@ -689,25 +784,36 @@ func main() {
 
 		case "tail":
 			lines := 50
-			if len(os.Args) > 3 {
-				if n, err := strconv.Atoi(os.Args[3]); err == nil {
+			if len(args) > 2 {
+				if n, err := strconv.Atoi(args[2]); err == nil {
 					lines = n
 				}
 			}
 			cluster.showAllLogsTail(lines)
 
+		case "follow":
+			for pool := 1; pool <= cluster.config.NumPools; pool++ {
+				for node := 1; node <= cluster.config.NodesPerPool; node++ {
+					go cluster.showLogs(pool, node)
+				}
+			}
+
+			for {
+				time.Sleep(10 * time.Second)
+			}
+
 		default:
 			// Assume it's pool and node numbers
-			if len(os.Args) < 4 {
+			if len(args) < 3 {
 				fmt.Println("Error: logs command requires both pool and node numbers")
 				os.Exit(1)
 			}
 
-			pool, err1 := strconv.Atoi(os.Args[2])
-			node, err2 := strconv.Atoi(os.Args[3])
+			pool, err1 := strconv.Atoi(args[1])
+			node, err2 := strconv.Atoi(args[2])
 
-			if err1 != nil || err2 != nil || pool < 1 || pool > NumPools || node < 1 || node > NodesPerPool {
-				fmt.Printf("Error: Invalid pool or node number (pool: 1-%d, node: 1-%d)\n", NumPools, NodesPerPool)
+			if err1 != nil || err2 != nil || pool < 1 || pool > cluster.config.NumPools || node < 1 || node > cluster.config.NodesPerPool {
+				fmt.Printf("Error: Invalid pool or node number (pool: 1-%d, node: 1-%d)\n", cluster.config.NumPools, cluster.config.NodesPerPool)
 				os.Exit(1)
 			}
 
@@ -717,6 +823,7 @@ func main() {
 		}
 
 	default:
+		fmt.Printf("Error: Unknown command '%s'\n\n", command)
 		printUsage()
 		os.Exit(1)
 	}
