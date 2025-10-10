@@ -174,7 +174,6 @@ func loadEnvFile(path string) error {
 }
 
 func main() {
-	// Load env file from ~/.secret/.gitai.env
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
 		envPath := filepath.Join(homeDir, ".secret", ".gitai.env")
@@ -193,7 +192,7 @@ func main() {
 		fmt.Println("2. Click 'Generate new token' -> 'Generate new token (classic)'")
 		fmt.Println("3. Give it a name and select these scopes: 'repo', 'read:org'")
 		fmt.Println("4. Generate and copy the token")
-		fmt.Println("5. Export it: export GITHUB_ACTIVITY_TOKEN=your_token_here")
+		fmt.Println("5. Export it: export GITHUB_TOKEN=your_token_here")
 		fmt.Println("6. Or add it to ~/.secret/.gitai.env")
 		os.Exit(1)
 	}
