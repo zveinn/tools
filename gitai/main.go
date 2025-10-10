@@ -21,6 +21,16 @@ type PRActivity struct {
 	Repo      string
 	PR        *github.PullRequest
 	UpdatedAt time.Time
+	Issues    []IssueActivity // Related issues linked to this PR
+}
+
+// IssueActivity represents an issue with its activity metadata
+type IssueActivity struct {
+	Label     string
+	Owner     string
+	Repo      string
+	Issue     *github.Issue
+	UpdatedAt time.Time
 }
 
 func loadEnvFile(path string) error {
@@ -193,14 +203,61 @@ func fetchAndDisplayActivity(token, username string) {
 	// 8. Check user's recent activity events to catch any missed PR interactions
 	activities = collectActivityFromEvents(ctx, client, username, seenPRs, activities)
 
+	// Now collect issues
+	fmt.Println()
+	color.Cyan("🔎 Running issue search queries...")
+	seenIssues := make(map[string]bool)
+	issueActivities := []IssueActivity{}
+
+	// Use GitHub's search API to find all issues involving the user
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue author:%s state:open", username), "✏️  Authored", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue mentions:%s state:open", username), "💬 Mentioned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue assignee:%s state:open", username), "👤 Assigned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue commenter:%s state:open", username), "💭 Commented", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue involves:%s state:open", username), "🔗 Involved", seenIssues, issueActivities)
+
+	// Link issues to PRs based on actual cross-references
+	// Only link if: PR mentions issue OR issue mentions PR
+	// Support many-to-many: an issue can be linked to multiple PRs and vice versa
+	color.Cyan("🔗 Checking cross-references between PRs and issues...")
+	linkedIssues := make(map[string]bool) // Track which issues are linked to at least one PR
+
+	for j := range issueActivities {
+		issue := &issueActivities[j]
+		issueKey := fmt.Sprintf("%s/%s#%d", issue.Owner, issue.Repo, issue.Issue.GetNumber())
+
+		for i := range activities {
+			pr := &activities[i]
+			// Only check PRs in the same repo and same owner
+			if pr.Owner == issue.Owner && pr.Repo == issue.Repo {
+				if areCrossReferenced(ctx, client, pr, issue) {
+					pr.Issues = append(pr.Issues, *issue)
+					linkedIssues[issueKey] = true
+					color.HiBlack("  ✓ Linked %s/%s#%d ↔ %s/%s#%d",
+						pr.Owner, pr.Repo, pr.PR.GetNumber(),
+						issue.Owner, issue.Repo, issue.Issue.GetNumber())
+				}
+			}
+		}
+	}
+
+	// Collect standalone issues (not linked to any PR)
+	standaloneIssues := []IssueActivity{}
+	for _, issue := range issueActivities {
+		issueKey := fmt.Sprintf("%s/%s#%d", issue.Owner, issue.Repo, issue.Issue.GetNumber())
+		if !linkedIssues[issueKey] {
+			standaloneIssues = append(standaloneIssues, issue)
+		}
+	}
+
 	duration := time.Since(startTime)
 	fmt.Println()
 	color.Cyan("⏱️  Total fetch time: %v", duration.Round(time.Millisecond))
-	color.Green("✨ Found %d unique PRs", len(activities))
+	color.Green("✨ Found %d unique PRs and %d unique issues", len(activities), len(issueActivities))
 	fmt.Println()
 
-	if len(activities) == 0 {
-		color.Yellow("No open PR activity found")
+	if len(activities) == 0 && len(standaloneIssues) == 0 {
+		color.Yellow("No open activity found")
 		return
 	}
 
@@ -208,12 +265,120 @@ func fetchAndDisplayActivity(token, username string) {
 	sort.Slice(activities, func(i, j int) bool {
 		return activities[i].UpdatedAt.After(activities[j].UpdatedAt)
 	})
+	sort.Slice(standaloneIssues, func(i, j int) bool {
+		return standaloneIssues[i].UpdatedAt.After(standaloneIssues[j].UpdatedAt)
+	})
 
 	// Display sorted activities
-	color.Cyan("📋 Pull Requests:")
-	for _, activity := range activities {
-		displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+	if len(activities) > 0 {
+		color.Cyan("📋 Pull Requests:")
+		for _, activity := range activities {
+			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
+			// Display related issues under the PR
+			if len(activity.Issues) > 0 {
+				for _, issue := range activity.Issues {
+					displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, true)
+				}
+			}
+		}
 	}
+
+	// Display standalone issues
+	if len(standaloneIssues) > 0 {
+		fmt.Println()
+		color.Cyan("📋 Issues (standalone):")
+		for _, issue := range standaloneIssues {
+			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
+		}
+	}
+}
+
+func areCrossReferenced(ctx context.Context, client *github.Client, pr *PRActivity, issue *IssueActivity) bool {
+	prNumber := pr.PR.GetNumber()
+	issueNumber := issue.Issue.GetNumber()
+
+	// Check if PR body mentions the issue (e.g., "fixes #123", "#123", "closes #123")
+	prBody := pr.PR.GetBody()
+	if mentionsNumber(prBody, issueNumber, pr.Owner, pr.Repo) {
+		return true
+	}
+
+	// Check if issue body mentions the PR
+	issueBody := issue.Issue.GetBody()
+	if mentionsNumber(issueBody, prNumber, issue.Owner, issue.Repo) {
+		return true
+	}
+
+	// Check PR comments for issue mentions
+	prComments, _, err := client.Issues.ListComments(ctx, pr.Owner, pr.Repo, prNumber, &github.IssueListCommentsOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	})
+	if err == nil {
+		for _, comment := range prComments {
+			if mentionsNumber(comment.GetBody(), issueNumber, pr.Owner, pr.Repo) {
+				return true
+			}
+		}
+	}
+
+	// Check issue comments for PR mentions
+	issueComments, _, err := client.Issues.ListComments(ctx, issue.Owner, issue.Repo, issueNumber, &github.IssueListCommentsOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	})
+	if err == nil {
+		for _, comment := range issueComments {
+			if mentionsNumber(comment.GetBody(), prNumber, issue.Owner, issue.Repo) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// mentionsNumber checks if text contains a reference to a given issue/PR number
+// Looks for patterns like: #123, fixes #123, closes #123, resolves #123, etc.
+// Also checks for full GitHub URLs like: https://github.com/owner/repo/issues/123
+func mentionsNumber(text string, number int, owner string, repo string) bool {
+	if text == "" {
+		return false
+	}
+
+	lowerText := strings.ToLower(text)
+
+	// Check for full GitHub URL patterns
+	// Both issues and pull requests can be referenced using /issues/ or /pull/ in the URL
+	urlPatterns := []string{
+		fmt.Sprintf("github.com/%s/%s/issues/%d", strings.ToLower(owner), strings.ToLower(repo), number),
+		fmt.Sprintf("github.com/%s/%s/pull/%d", strings.ToLower(owner), strings.ToLower(repo), number),
+	}
+	for _, pattern := range urlPatterns {
+		if strings.Contains(lowerText, pattern) {
+			return true
+		}
+	}
+
+	// Common shorthand patterns for referencing issues/PRs
+	patterns := []string{
+		fmt.Sprintf("#%d", number),
+		fmt.Sprintf("fixes #%d", number),
+		fmt.Sprintf("closes #%d", number),
+		fmt.Sprintf("resolves #%d", number),
+		fmt.Sprintf("fixed #%d", number),
+		fmt.Sprintf("closed #%d", number),
+		fmt.Sprintf("resolved #%d", number),
+		fmt.Sprintf("fix #%d", number),
+		fmt.Sprintf("close #%d", number),
+		fmt.Sprintf("resolve #%d", number),
+	}
+
+	for _, pattern := range patterns {
+		if strings.Contains(lowerText, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity) []PRActivity {
@@ -413,17 +578,117 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	}
 
 	// Use UpdatedAt as the most recent activity date
-	activityDate := ""
+	dateStr := "          "
 	if pr.UpdatedAt != nil {
-		activityDate = gray(pr.UpdatedAt.Format("2006/01/02"))
+		dateStr = pr.UpdatedAt.Format("2006/01/02")
 	}
 
 	fmt.Printf("%s %s %s %s %s/%s#%d - %s\n",
-		activityDate,
+		gray(dateStr),
 		status,
 		cyan(label),
 		yellow(pr.User.GetLogin()),
 		owner, repo, *pr.Number,
 		*pr.Title,
 	)
+}
+
+func displayIssue(label, owner, repo string, issue *github.Issue, indented bool) {
+	green := color.New(color.FgGreen).SprintFunc()
+	cyan := color.New(color.FgCyan).SprintFunc()
+	yellow := color.New(color.FgYellow).SprintFunc()
+	gray := color.New(color.FgHiBlack).SprintFunc()
+
+	status := green("●")
+
+	// Use UpdatedAt as the most recent activity date
+	dateStr := "          "
+	if issue.UpdatedAt != nil {
+		dateStr = issue.UpdatedAt.Format("2006/01/02")
+	}
+
+	indent := ""
+	if indented {
+		indent = "  "
+	}
+
+	fmt.Printf("%s%s %s %s %s %s/%s#%d - %s\n",
+		indent,
+		gray(dateStr),
+		status,
+		cyan(label),
+		yellow(issue.User.GetLogin()),
+		owner, repo, *issue.Number,
+		*issue.Title,
+	)
+}
+
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, issueActivities []IssueActivity) []IssueActivity {
+	opts := &github.SearchOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	totalFound := 0
+
+	// Paginate through all results
+	page := 1
+	for {
+		color.HiBlack("  [%s] Searching page %d...", label, page)
+		result, resp, err := client.Search.Issues(ctx, query, opts)
+		if err != nil {
+			color.Red("Error searching '%s': %v", query, err)
+			if resp != nil {
+				color.Red("Rate limit remaining: %d", resp.Rate.Remaining)
+			}
+			return issueActivities
+		}
+
+		pageResults := 0
+		for _, issue := range result.Issues {
+			// Skip if this is actually a PR
+			if issue.PullRequestLinks != nil {
+				continue
+			}
+
+			// Parse owner/repo from repository URL
+			repoURL := *issue.RepositoryURL
+			parts := strings.Split(repoURL, "/")
+			if len(parts) < 2 {
+				color.Red("  [%s] Error: Invalid repository URL format: %s", label, repoURL)
+				continue
+			}
+			owner := parts[len(parts)-2]
+			repo := parts[len(parts)-1]
+
+			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
+			if !seenIssues[issueKey] {
+				seenIssues[issueKey] = true
+
+				issueActivities = append(issueActivities, IssueActivity{
+					Label:     label,
+					Owner:     owner,
+					Repo:      repo,
+					Issue:     issue,
+					UpdatedAt: issue.GetUpdatedAt().Time,
+				})
+				pageResults++
+				totalFound++
+			}
+		}
+
+		color.HiBlack("  [%s] Page %d: found %d new issues (total: %d)", label, page, pageResults, totalFound)
+
+		// Check if there are more pages
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+		page++
+	}
+
+	if totalFound > 0 {
+		color.Green("  [%s] ✓ Complete: %d issues found", label, totalFound)
+	}
+
+	return issueActivities
 }
