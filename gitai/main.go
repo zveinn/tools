@@ -60,7 +60,7 @@ func (p *Progress) display() {
 	percentage := float64(p.current) / float64(p.total) * 100
 	bar := "["
 	filled := int(percentage / 2) // 50 chars for 100%
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if i < filled {
 			bar += "="
 		} else if i == filled {
