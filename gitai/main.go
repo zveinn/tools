@@ -78,6 +78,20 @@ func getUserColor(username string) *color.Color {
 	return colors[hash%uint32(len(colors))]
 }
 
+// getStateColor returns a color for a given issue/PR state
+func getStateColor(state string) *color.Color {
+	switch state {
+	case "open":
+		return color.New(color.FgGreen)
+	case "closed":
+		return color.New(color.FgRed)
+	case "merged":
+		return color.New(color.FgMagenta)
+	default:
+		return color.New(color.FgWhite)
+	}
+}
+
 func loadEnvFile(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -395,7 +409,8 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// Display open PRs
 	if len(openPRs) > 0 {
-		fmt.Println("Open Pull Requests:")
+		titleColor := color.New(color.FgHiGreen, color.Bold)
+		fmt.Println(titleColor.Sprint("OPEN PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range openPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
@@ -411,7 +426,8 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	// Display merged PRs
 	if len(mergedPRs) > 0 {
 		fmt.Println()
-		fmt.Println("Merged Pull Requests:")
+		titleColor := color.New(color.FgHiMagenta, color.Bold)
+		fmt.Println(titleColor.Sprint("MERGED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range mergedPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
@@ -427,7 +443,8 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	// Display closed PRs
 	if len(closedPRs) > 0 {
 		fmt.Println()
-		fmt.Println("Closed Pull Requests:")
+		titleColor := color.New(color.FgHiRed, color.Bold)
+		fmt.Println(titleColor.Sprint("CLOSED PULL REQUESTS:"))
 		fmt.Println("------------------------------------------")
 		for _, activity := range closedPRs {
 			displayPR(activity.Label, activity.Owner, activity.Repo, activity.PR)
@@ -443,7 +460,8 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	// Display open standalone issues
 	if len(openIssues) > 0 {
 		fmt.Println()
-		fmt.Println("Open Issues:")
+		titleColor := color.New(color.FgHiGreen, color.Bold)
+		fmt.Println(titleColor.Sprint("OPEN ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range openIssues {
 			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
@@ -453,7 +471,8 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 	// Display closed standalone issues
 	if len(closedIssues) > 0 {
 		fmt.Println()
-		fmt.Println("Closed Issues:")
+		titleColor := color.New(color.FgHiRed, color.Bold)
+		fmt.Println(titleColor.Sprint("CLOSED ISSUES:"))
 		fmt.Println("------------------------------------------")
 		for _, issue := range closedIssues {
 			displayIssue(issue.Label, issue.Owner, issue.Repo, issue.Issue, false)
@@ -760,7 +779,7 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 
 	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
 		dateStr,
-		labelColor.Sprint(label),
+		labelColor.Sprint(strings.ToUpper(label)),
 		userColor.Sprint(pr.User.GetLogin()),
 		owner, repo, *pr.Number,
 		*pr.Title,
@@ -776,7 +795,9 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 
 	indent := ""
 	if indented {
-		indent = fmt.Sprintf("-- %s ", *issue.State)
+		state := strings.ToUpper(*issue.State)
+		stateColor := getStateColor(*issue.State)
+		indent = fmt.Sprintf("-- %s ", stateColor.Sprint(state))
 	}
 
 	labelColor := getLabelColor(label)
@@ -785,7 +806,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
 		indent,
 		dateStr,
-		labelColor.Sprint(label),
+		labelColor.Sprint(strings.ToUpper(label)),
 		userColor.Sprint(issue.User.GetLogin()),
 		owner, repo, *issue.Number,
 		*issue.Title,
