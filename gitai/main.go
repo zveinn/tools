@@ -145,14 +145,14 @@ func main() {
 	}
 
 	fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
-	fmt.Println("Press Ctrl+C to stop\n")
+	fmt.Println("Press Ctrl+C to stop")
 
 	// Poll every 2 minutes
 	for {
 		fetchAndDisplayActivity(token, username)
 		time.Sleep(2 * time.Minute)
 		fmt.Println()
-		fmt.Println("Refreshing...\n")
+		fmt.Println("Refreshing...")
 	}
 }
 
@@ -214,35 +214,39 @@ func fetchAndDisplayActivity(token, username string) {
 
 	fmt.Println("Running optimized search queries...")
 
+	// Calculate date for one year ago
+	oneYearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
+	dateFilter := fmt.Sprintf("updated:>=%s", oneYearAgo)
+
 	// Use GitHub's efficient search API to find all PRs involving the user
 	// We use specific queries to properly label each type of involvement
 
 	// 1. PRs authored by the user
-	searchQuery := fmt.Sprintf("is:pr author:%s state:open", username)
+	searchQuery := fmt.Sprintf("is:pr author:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Authored", seenPRs, activities)
 
 	// 2. PRs where user is mentioned
-	searchQuery = fmt.Sprintf("is:pr mentions:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr mentions:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Mentioned", seenPRs, activities)
 
 	// 3. PRs where user is assigned
-	searchQuery = fmt.Sprintf("is:pr assignee:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr assignee:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Assigned", seenPRs, activities)
 
 	// 4. PRs where user commented
-	searchQuery = fmt.Sprintf("is:pr commenter:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr commenter:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Commented", seenPRs, activities)
 
 	// 5. PRs where user reviewed
-	searchQuery = fmt.Sprintf("is:pr reviewed-by:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr reviewed-by:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Reviewed", seenPRs, activities)
 
 	// 6. PRs where user is requested for review
-	searchQuery = fmt.Sprintf("is:pr review-requested:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr review-requested:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Review Requested", seenPRs, activities)
 
 	// 7. Main query as catch-all for any other involvement
-	searchQuery = fmt.Sprintf("is:pr involves:%s state:open", username)
+	searchQuery = fmt.Sprintf("is:pr involves:%s state:open %s", username, dateFilter)
 	activities = collectSearchResults(ctx, client, searchQuery, "Involved", seenPRs, activities)
 
 	// 8. Check user's recent activity events to catch any missed PR interactions
@@ -255,11 +259,11 @@ func fetchAndDisplayActivity(token, username string) {
 	issueActivities := []IssueActivity{}
 
 	// Use GitHub's search API to find all issues involving the user
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue author:%s state:open", username), "Authored", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue mentions:%s state:open", username), "Mentioned", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue assignee:%s state:open", username), "Assigned", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue commenter:%s state:open", username), "Commented", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue involves:%s state:open", username), "Involved", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue author:%s state:open %s", username, dateFilter), "Authored", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue mentions:%s state:open %s", username, dateFilter), "Mentioned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue assignee:%s state:open %s", username, dateFilter), "Assigned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue commenter:%s state:open %s", username, dateFilter), "Commented", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue involves:%s state:open %s", username, dateFilter), "Involved", seenIssues, issueActivities)
 
 	// Link issues to PRs based on actual cross-references
 	// Only link if: PR mentions issue OR issue mentions PR
