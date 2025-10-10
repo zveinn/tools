@@ -58,19 +58,36 @@ func (p *Progress) display() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	percentage := float64(p.current) / float64(p.total) * 100
-	bar := "["
+
+	// Build the progress bar with colors
 	filled := int(percentage / 2) // 50 chars for 100%
+	var barContent string
 	for i := range 50 {
 		if i < filled {
-			bar += "="
+			barContent += "="
 		} else if i == filled {
-			bar += ">"
+			barContent += ">"
 		} else {
-			bar += " "
+			barContent += " "
 		}
 	}
-	bar += "]"
-	fmt.Printf("\r%s %d/%d (%.0f%%) ", bar, p.current, p.total, percentage)
+
+	// Choose color based on percentage
+	var barColor *color.Color
+	if percentage < 33 {
+		barColor = color.New(color.FgRed)
+	} else if percentage < 66 {
+		barColor = color.New(color.FgYellow)
+	} else {
+		barColor = color.New(color.FgGreen)
+	}
+
+	// Format: [colored bar] current/total (percentage%)
+	fmt.Printf("\r[%s] %s/%s (%s) ",
+		barColor.Sprint(barContent),
+		color.New(color.FgCyan).Sprint(p.current),
+		color.New(color.FgCyan).Sprint(p.total),
+		barColor.Sprintf("%.0f%%", percentage))
 }
 
 // getLabelColor returns a consistent color for a given label
@@ -223,7 +240,6 @@ func main() {
 	if debugMode {
 		fmt.Println("Debug mode enabled")
 	}
-	fmt.Println("Press Ctrl+C to stop")
 
 	fetchAndDisplayActivity(token, username, includeClosed, debugMode)
 }
@@ -286,6 +302,7 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 
 	// Track seen PRs to avoid duplicates
 	seenPRs := make(map[string]bool)
+	var seenPRsMu sync.Mutex
 	activities := []PRActivity{}
 
 	// Initialize progress tracker
@@ -326,51 +343,79 @@ func fetchAndDisplayActivity(token, username string, includeClosed bool, debugMo
 		return fmt.Sprintf("%s %s", base, dateFilter)
 	}
 
-	// 1. PRs authored by the user
-	searchQuery := buildQuery(fmt.Sprintf("is:pr author:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Authored", seenPRs, activities, debugMode, progress)
+	// Parallelize all PR searches
+	var prWg sync.WaitGroup
+	var activitiesMu sync.Mutex
 
-	// 2. PRs where user is mentioned
-	searchQuery = buildQuery(fmt.Sprintf("is:pr mentions:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Mentioned", seenPRs, activities, debugMode, progress)
+	prQueries := []struct {
+		query string
+		label string
+	}{
+		{buildQuery(fmt.Sprintf("is:pr author:%s", username)), "Authored"},
+		{buildQuery(fmt.Sprintf("is:pr mentions:%s", username)), "Mentioned"},
+		{buildQuery(fmt.Sprintf("is:pr assignee:%s", username)), "Assigned"},
+		{buildQuery(fmt.Sprintf("is:pr commenter:%s", username)), "Commented"},
+		{buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", username)), "Reviewed"},
+		{buildQuery(fmt.Sprintf("is:pr review-requested:%s", username)), "Review Requested"},
+		{buildQuery(fmt.Sprintf("is:pr involves:%s", username)), "Involved"},
+	}
 
-	// 3. PRs where user is assigned
-	searchQuery = buildQuery(fmt.Sprintf("is:pr assignee:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Assigned", seenPRs, activities, debugMode, progress)
+	for _, pq := range prQueries {
+		query := pq.query
+		label := pq.label
+		prWg.Go(func() {
+			results := collectSearchResults(ctx, client, query, label, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
+			activitiesMu.Lock()
+			activities = append(activities, results...)
+			activitiesMu.Unlock()
+		})
+	}
 
-	// 4. PRs where user commented
-	searchQuery = buildQuery(fmt.Sprintf("is:pr commenter:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Commented", seenPRs, activities, debugMode, progress)
+	// Also run event collection in parallel
+	prWg.Go(func() {
+		results := collectActivityFromEvents(ctx, client, username, seenPRs, &seenPRsMu, []PRActivity{}, debugMode, progress)
+		activitiesMu.Lock()
+		activities = append(activities, results...)
+		activitiesMu.Unlock()
+	})
 
-	// 5. PRs where user reviewed
-	searchQuery = buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Reviewed", seenPRs, activities, debugMode, progress)
+	prWg.Wait()
 
-	// 6. PRs where user is requested for review
-	searchQuery = buildQuery(fmt.Sprintf("is:pr review-requested:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Review Requested", seenPRs, activities, debugMode, progress)
-
-	// 7. Main query as catch-all for any other involvement
-	searchQuery = buildQuery(fmt.Sprintf("is:pr involves:%s", username))
-	activities = collectSearchResults(ctx, client, searchQuery, "Involved", seenPRs, activities, debugMode, progress)
-
-	// 8. Check user's recent activity events to catch any missed PR interactions
-	activities = collectActivityFromEvents(ctx, client, username, seenPRs, activities, debugMode, progress)
-
-	// Now collect issues
+	// Now collect issues in parallel
 	if debugMode {
 		fmt.Println()
 		fmt.Println("Running issue search queries...")
 	}
 	seenIssues := make(map[string]bool)
+	var seenIssuesMu sync.Mutex
 	issueActivities := []IssueActivity{}
 
-	// Use GitHub's search API to find all issues involving the user
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored", seenIssues, issueActivities, debugMode, progress)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned", seenIssues, issueActivities, debugMode, progress)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned", seenIssues, issueActivities, debugMode, progress)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented", seenIssues, issueActivities, debugMode, progress)
-	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved", seenIssues, issueActivities, debugMode, progress)
+	var issueWg sync.WaitGroup
+	var issuesMu sync.Mutex
+
+	issueQueries := []struct {
+		query string
+		label string
+	}{
+		{buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored"},
+		{buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned"},
+		{buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned"},
+		{buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented"},
+		{buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved"},
+	}
+
+	for _, iq := range issueQueries {
+		query := iq.query
+		label := iq.label
+		issueWg.Go(func() {
+			results := collectIssueSearchResults(ctx, client, query, label, seenIssues, &seenIssuesMu, []IssueActivity{}, debugMode, progress)
+			issuesMu.Lock()
+			issueActivities = append(issueActivities, results...)
+			issuesMu.Unlock()
+		})
+	}
+
+	issueWg.Wait()
 
 	// Link issues to PRs based on actual cross-references
 	// Only link if: PR mentions issue OR issue mentions PR
@@ -646,7 +691,7 @@ func mentionsNumber(text string, number int, owner string, repo string) bool {
 	return false
 }
 
-func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -716,14 +761,21 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 
 				if prNumber > 0 {
 					prKey := fmt.Sprintf("%s/%s#%d", owner, repo, prNumber)
-					if !seenPRs[prKey] {
+
+					seenPRsMu.Lock()
+					seen := seenPRs[prKey]
+					if !seen {
+						seenPRs[prKey] = true
+					}
+					seenPRsMu.Unlock()
+
+					if !seen {
 						// Fetch the PR details
 						pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
 						if err != nil || pr.GetState() != "open" {
 							continue
 						}
 
-						seenPRs[prKey] = true
 						activities = append(activities, PRActivity{
 							Label:     "Recent Activity",
 							Owner:     owner,
@@ -754,7 +806,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	return activities
 }
 
-func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
+func collectSearchResults(ctx context.Context, client *github.Client, query, label string, seenPRs map[string]bool, seenPRsMu *sync.Mutex, activities []PRActivity, debugMode bool, progress *Progress) []PRActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -802,9 +854,15 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			repo := parts[len(parts)-1]
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
-			if !seenPRs[prKey] {
-				seenPRs[prKey] = true
 
+			seenPRsMu.Lock()
+			seen := seenPRs[prKey]
+			if !seen {
+				seenPRs[prKey] = true
+			}
+			seenPRsMu.Unlock()
+
+			if !seen {
 				// Fetch the actual PR to get more details
 				pr, _, err := client.PullRequests.Get(ctx, owner, repo, *issue.Number)
 				if err != nil {
@@ -899,7 +957,7 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	)
 }
 
-func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, issueActivities []IssueActivity, debugMode bool, progress *Progress) []IssueActivity {
+func collectIssueSearchResults(ctx context.Context, client *github.Client, query, label string, seenIssues map[string]bool, seenIssuesMu *sync.Mutex, issueActivities []IssueActivity, debugMode bool, progress *Progress) []IssueActivity {
 	opts := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
@@ -946,9 +1004,15 @@ func collectIssueSearchResults(ctx context.Context, client *github.Client, query
 			repo := parts[len(parts)-1]
 
 			issueKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
-			if !seenIssues[issueKey] {
-				seenIssues[issueKey] = true
 
+			seenIssuesMu.Lock()
+			seen := seenIssues[issueKey]
+			if !seen {
+				seenIssues[issueKey] = true
+			}
+			seenIssuesMu.Unlock()
+
+			if !seen {
 				issueActivities = append(issueActivities, IssueActivity{
 					Label:     label,
 					Owner:     owner,
