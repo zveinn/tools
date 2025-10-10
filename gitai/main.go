@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/google/go-github/v57/github"
 )
 
@@ -30,6 +32,50 @@ type IssueActivity struct {
 	Repo      string
 	Issue     *github.Issue
 	UpdatedAt time.Time
+}
+
+// getLabelColor returns a consistent color for a given label
+func getLabelColor(label string) *color.Color {
+	labelColors := map[string]*color.Color{
+		"Authored":         color.New(color.FgCyan),
+		"Mentioned":        color.New(color.FgYellow),
+		"Assigned":         color.New(color.FgMagenta),
+		"Commented":        color.New(color.FgBlue),
+		"Reviewed":         color.New(color.FgGreen),
+		"Review Requested": color.New(color.FgRed),
+		"Involved":         color.New(color.FgHiBlack),
+		"Recent Activity":  color.New(color.FgHiCyan),
+	}
+
+	if c, ok := labelColors[label]; ok {
+		return c
+	}
+	return color.New(color.FgWhite)
+}
+
+// getUserColor returns a consistent color for a given username using hash
+func getUserColor(username string) *color.Color {
+	// Use hash to get consistent color for each user
+	h := fnv.New32a()
+	h.Write([]byte(username))
+	hash := h.Sum32()
+
+	// Map to a set of nice visible colors
+	colors := []*color.Color{
+		color.New(color.FgHiGreen),
+		color.New(color.FgHiYellow),
+		color.New(color.FgHiBlue),
+		color.New(color.FgHiMagenta),
+		color.New(color.FgHiCyan),
+		color.New(color.FgHiRed),
+		color.New(color.FgGreen),
+		color.New(color.FgYellow),
+		color.New(color.FgBlue),
+		color.New(color.FgMagenta),
+		color.New(color.FgCyan),
+	}
+
+	return colors[hash%uint32(len(colors))]
 }
 
 func loadEnvFile(path string) error {
@@ -570,10 +616,13 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 		dateStr = pr.UpdatedAt.Format("2006/01/02")
 	}
 
-	fmt.Printf("%s [%s] (%s) %s/%s#%d - %s\n",
+	labelColor := getLabelColor(label)
+	userColor := getUserColor(pr.User.GetLogin())
+
+	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
 		dateStr,
-		label,
-		pr.User.GetLogin(),
+		labelColor.Sprint(label),
+		userColor.Sprint(pr.User.GetLogin()),
 		owner, repo, *pr.Number,
 		*pr.Title,
 	)
@@ -591,11 +640,14 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 		indent = "-- "
 	}
 
-	fmt.Printf("%s%s [%s] (%s) %s/%s#%d - %s\n",
+	labelColor := getLabelColor(label)
+	userColor := getUserColor(issue.User.GetLogin())
+
+	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
 		indent,
 		dateStr,
-		label,
-		issue.User.GetLogin(),
+		labelColor.Sprint(label),
+		userColor.Sprint(issue.User.GetLogin()),
 		owner, repo, *issue.Number,
 		*issue.Title,
 	)
