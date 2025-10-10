@@ -128,32 +128,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse command line arguments
+	var username string
+	var includeClosed bool
+
 	// Get username from command line or environment
-	username := os.Getenv("GITHUB_USERNAME")
+	username = os.Getenv("GITHUB_USERNAME")
 	if username == "" {
 		username = os.Getenv("GITHUB_USER")
 	}
-	if len(os.Args) > 1 {
-		username = os.Args[1]
+
+	// Parse arguments
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "--closed" {
+			includeClosed = true
+		} else if !strings.HasPrefix(arg, "--") {
+			username = arg
+		}
 	}
+
 	if username == "" {
 		fmt.Println("Error: Please provide a GitHub username")
-		fmt.Println("Usage: gitai <username>")
+		fmt.Println("Usage: gitai [--closed] <username>")
+		fmt.Println("  --closed: Include closed PRs/issues from the last month")
 		fmt.Println("Or set GITHUB_USERNAME environment variable")
 		fmt.Println("Or add it to ~/.secret/.gitai.env")
 		os.Exit(1)
 	}
 
 	fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
+	if includeClosed {
+		fmt.Println("Including closed items from the last month")
+	}
 	fmt.Println("Press Ctrl+C to stop")
 
-	// Poll every 2 minutes
-	for {
-		fetchAndDisplayActivity(token, username)
-		time.Sleep(2 * time.Minute)
-		fmt.Println()
-		fmt.Println("Refreshing...")
-	}
+	fetchAndDisplayActivity(token, username, includeClosed)
 }
 
 func checkRateLimit(ctx context.Context, client *github.Client) error {
@@ -196,7 +206,7 @@ func checkRateLimit(ctx context.Context, client *github.Client) error {
 	return nil
 }
 
-func fetchAndDisplayActivity(token, username string) {
+func fetchAndDisplayActivity(token, username string, includeClosed bool) {
 	startTime := time.Now()
 	ctx := context.Background()
 	client := github.NewClient(nil).WithAuthToken(token)
@@ -214,39 +224,59 @@ func fetchAndDisplayActivity(token, username string) {
 
 	fmt.Println("Running optimized search queries...")
 
-	// Calculate date for one year ago
-	oneYearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
-	dateFilter := fmt.Sprintf("updated:>=%s", oneYearAgo)
+	// Calculate dates
+	sixMonthsAgo := time.Now().AddDate(0, -6, 0).Format("2006-01-02")
+	oneMonthAgo := time.Now().AddDate(0, -1, 0).Format("2006-01-02")
+
+	// Build state and date filters
+	var stateFilter, dateFilter string
+	if includeClosed {
+		// For closed items, show only from last month
+		stateFilter = "" // No state filter - include both open and closed
+		dateFilter = fmt.Sprintf("updated:>=%s", oneMonthAgo)
+	} else {
+		// For open items, show from last year
+		stateFilter = "state:open"
+		dateFilter = fmt.Sprintf("updated:>=%s", sixMonthsAgo)
+	}
 
 	// Use GitHub's efficient search API to find all PRs involving the user
 	// We use specific queries to properly label each type of involvement
 
+	// Build query with optional state filter
+	buildQuery := func(base string) string {
+		if stateFilter != "" {
+			return fmt.Sprintf("%s %s %s", base, stateFilter, dateFilter)
+		}
+		return fmt.Sprintf("%s %s", base, dateFilter)
+	}
+
 	// 1. PRs authored by the user
-	searchQuery := fmt.Sprintf("is:pr author:%s state:open %s", username, dateFilter)
+	searchQuery := buildQuery(fmt.Sprintf("is:pr author:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Authored", seenPRs, activities)
 
 	// 2. PRs where user is mentioned
-	searchQuery = fmt.Sprintf("is:pr mentions:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr mentions:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Mentioned", seenPRs, activities)
 
 	// 3. PRs where user is assigned
-	searchQuery = fmt.Sprintf("is:pr assignee:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr assignee:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Assigned", seenPRs, activities)
 
 	// 4. PRs where user commented
-	searchQuery = fmt.Sprintf("is:pr commenter:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr commenter:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Commented", seenPRs, activities)
 
 	// 5. PRs where user reviewed
-	searchQuery = fmt.Sprintf("is:pr reviewed-by:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr reviewed-by:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Reviewed", seenPRs, activities)
 
 	// 6. PRs where user is requested for review
-	searchQuery = fmt.Sprintf("is:pr review-requested:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr review-requested:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Review Requested", seenPRs, activities)
 
 	// 7. Main query as catch-all for any other involvement
-	searchQuery = fmt.Sprintf("is:pr involves:%s state:open %s", username, dateFilter)
+	searchQuery = buildQuery(fmt.Sprintf("is:pr involves:%s", username))
 	activities = collectSearchResults(ctx, client, searchQuery, "Involved", seenPRs, activities)
 
 	// 8. Check user's recent activity events to catch any missed PR interactions
@@ -259,11 +289,11 @@ func fetchAndDisplayActivity(token, username string) {
 	issueActivities := []IssueActivity{}
 
 	// Use GitHub's search API to find all issues involving the user
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue author:%s state:open %s", username, dateFilter), "Authored", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue mentions:%s state:open %s", username, dateFilter), "Mentioned", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue assignee:%s state:open %s", username, dateFilter), "Assigned", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue commenter:%s state:open %s", username, dateFilter), "Commented", seenIssues, issueActivities)
-	issueActivities = collectIssueSearchResults(ctx, client, fmt.Sprintf("is:issue involves:%s state:open %s", username, dateFilter), "Involved", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue author:%s", username)), "Authored", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue mentions:%s", username)), "Mentioned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue assignee:%s", username)), "Assigned", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue commenter:%s", username)), "Commented", seenIssues, issueActivities)
+	issueActivities = collectIssueSearchResults(ctx, client, buildQuery(fmt.Sprintf("is:issue involves:%s", username)), "Involved", seenIssues, issueActivities)
 
 	// Link issues to PRs based on actual cross-references
 	// Only link if: PR mentions issue OR issue mentions PR
@@ -623,8 +653,19 @@ func displayPR(label, owner, repo string, pr *github.PullRequest) {
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(pr.User.GetLogin())
 
-	fmt.Printf("%s %s %s %s/%s#%d - %s\n",
+	// Add state indicator
+	stateStr := ""
+	if pr.State != nil && *pr.State == "closed" {
+		if pr.Merged != nil && *pr.Merged {
+			stateStr = color.New(color.FgMagenta).Sprint("MERGED ")
+		} else {
+			stateStr = color.New(color.FgRed).Sprint("CLOSED ")
+		}
+	}
+
+	fmt.Printf("%s %s%s %s %s/%s#%d - %s\n",
 		dateStr,
+		stateStr,
 		labelColor.Sprint(label),
 		userColor.Sprint(pr.User.GetLogin()),
 		owner, repo, *pr.Number,
@@ -647,9 +688,16 @@ func displayIssue(label, owner, repo string, issue *github.Issue, indented bool)
 	labelColor := getLabelColor(label)
 	userColor := getUserColor(issue.User.GetLogin())
 
-	fmt.Printf("%s%s %s %s %s/%s#%d - %s\n",
+	// Add state indicator
+	stateStr := ""
+	if issue.State != nil && *issue.State == "closed" {
+		stateStr = color.New(color.FgRed).Sprint("[CLOSED] ")
+	}
+
+	fmt.Printf("%s%s %s%s %s %s/%s#%d - %s\n",
 		indent,
 		dateStr,
+		stateStr,
 		labelColor.Sprint(label),
 		userColor.Sprint(issue.User.GetLogin()),
 		owner, repo, *issue.Number,
