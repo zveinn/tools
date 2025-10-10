@@ -157,14 +157,14 @@ func fetchAndDisplayActivity(token, username string) {
 	seenPRs := make(map[string]bool)
 	activities := []PRActivity{}
 
-	color.Cyan("🔎 Running search queries...")
+	color.Cyan("🔎 Running optimized search queries...")
 
-	// Comprehensive search strategies to catch ALL PR activity
-	// Using multiple overlapping searches to ensure nothing is missed
+	// Use GitHub's efficient search API to find all PRs involving the user
+	// We use specific queries to properly label each type of involvement
 
-	// 1. PRs created by user
+	// 1. PRs authored by the user
 	searchQuery := fmt.Sprintf("is:pr author:%s state:open", username)
-	activities = collectSearchResults(ctx, client, searchQuery, "✏️  Created", seenPRs, activities)
+	activities = collectSearchResults(ctx, client, searchQuery, "✏️  Authored", seenPRs, activities)
 
 	// 2. PRs where user is mentioned
 	searchQuery = fmt.Sprintf("is:pr mentions:%s state:open", username)
@@ -174,126 +174,24 @@ func fetchAndDisplayActivity(token, username string) {
 	searchQuery = fmt.Sprintf("is:pr assignee:%s state:open", username)
 	activities = collectSearchResults(ctx, client, searchQuery, "👤 Assigned", seenPRs, activities)
 
-	// 4. PRs where user reviewed
-	searchQuery = fmt.Sprintf("is:pr reviewed-by:%s state:open", username)
-	activities = collectSearchResults(ctx, client, searchQuery, "👁️  Reviewed", seenPRs, activities)
-
-	// 5. PRs where user requested for review
-	searchQuery = fmt.Sprintf("is:pr review-requested:%s state:open", username)
-	activities = collectSearchResults(ctx, client, searchQuery, "🔔 Review Requested", seenPRs, activities)
-
-	// 6. PRs where user commented
+	// 4. PRs where user commented
 	searchQuery = fmt.Sprintf("is:pr commenter:%s state:open", username)
 	activities = collectSearchResults(ctx, client, searchQuery, "💭 Commented", seenPRs, activities)
 
-	// 7. PRs involving the user in any way (comprehensive catch-all)
+	// 5. PRs where user reviewed
+	searchQuery = fmt.Sprintf("is:pr reviewed-by:%s state:open", username)
+	activities = collectSearchResults(ctx, client, searchQuery, "👁️  Reviewed", seenPRs, activities)
+
+	// 6. PRs where user is requested for review
+	searchQuery = fmt.Sprintf("is:pr review-requested:%s state:open", username)
+	activities = collectSearchResults(ctx, client, searchQuery, "🔔 Review Requested", seenPRs, activities)
+
+	// 7. Main query as catch-all for any other involvement
 	searchQuery = fmt.Sprintf("is:pr involves:%s state:open", username)
 	activities = collectSearchResults(ctx, client, searchQuery, "🔗 Involved", seenPRs, activities)
 
-	// 8. PRs where user is a team member (for org repos)
-	// searchQuery = fmt.Sprintf("is:pr team-review-requested:%s state:open", username)
-	// activities = collectSearchResults(ctx, client, searchQuery, "👥 Team Review", seenPRs, activities)
-
-	// 9. PRs in repos the user has contributed to (recently active)
-	searchQuery = fmt.Sprintf("is:pr user:%s state:open", username)
-	activities = collectSearchResults(ctx, client, searchQuery, "🤝 Contributor", seenPRs, activities)
-
-	// 10. Draft PRs created by user (in case they're filtered differently)
-	searchQuery = fmt.Sprintf("is:pr author:%s state:open draft:true", username)
-	activities = collectSearchResults(ctx, client, searchQuery, "📝 Draft", seenPRs, activities)
-
-	// 11. Check user's recent activity events to catch any PR interactions
+	// 8. Check user's recent activity events to catch any missed PR interactions
 	activities = collectActivityFromEvents(ctx, client, username, seenPRs, activities)
-
-	// 12. Check repositories where user has push access (includes private repos and org repos)
-	activities = collectFromAccessibleRepos(ctx, client, username, seenPRs, activities)
-
-	// 13. Get user's repositories and check for PRs (using non-deprecated API) with pagination
-	color.Cyan("🏠 Checking user's own repositories...")
-	repoOpts := &github.RepositoryListByUserOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
-	}
-
-	ownRepoPage := 1
-	for {
-		color.HiBlack("  [Own Repos] Fetching page %d...", ownRepoPage)
-		repos, resp, err := client.Repositories.ListByUser(ctx, username, repoOpts)
-		if err != nil {
-			color.Red("Error fetching repositories: %v", err)
-			break
-		}
-
-		for _, repo := range repos {
-			prOpts := &github.PullRequestListOptions{
-				State:       "open",
-				ListOptions: github.ListOptions{PerPage: 100},
-			}
-
-			// Paginate through PRs in this repo
-			for {
-				prs, prResp, err := client.PullRequests.List(ctx, username, *repo.Name, prOpts)
-				if err != nil {
-					break
-				}
-
-				for _, pr := range prs {
-					prKey := fmt.Sprintf("%s/%s#%d", username, *repo.Name, *pr.Number)
-					if !seenPRs[prKey] {
-						seenPRs[prKey] = true
-						activities = append(activities, PRActivity{
-							Label:     "🏠 Own Repo",
-							Owner:     username,
-							Repo:      *repo.Name,
-							PR:        pr,
-							UpdatedAt: pr.GetUpdatedAt().Time,
-						})
-					}
-				}
-
-				if prResp.NextPage == 0 {
-					break
-				}
-				prOpts.Page = prResp.NextPage
-			}
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		repoOpts.Page = resp.NextPage
-		ownRepoPage++
-	}
-
-	// 14. Check user's organizations and their repositories
-	color.Cyan("🏢 Checking organizations...")
-	orgOpts := &github.ListOptions{PerPage: 100}
-	orgPage := 1
-	totalOrgs := 0
-	for {
-		color.HiBlack("  [Orgs] Fetching page %d...", orgPage)
-		orgs, resp, err := client.Organizations.List(ctx, username, orgOpts)
-		if err != nil {
-			// Not an error if user has no orgs or we can't access them
-			color.HiBlack("  [Orgs] No organizations or unable to access")
-			break
-		}
-
-		totalOrgs += len(orgs)
-		for _, org := range orgs {
-			// Search for PRs in this org's repos involving the user
-			orgSearchQuery := fmt.Sprintf("is:pr org:%s involves:%s state:open", org.GetLogin(), username)
-			activities = collectSearchResults(ctx, client, orgSearchQuery, "🏢 Org", seenPRs, activities)
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		orgOpts.Page = resp.NextPage
-		orgPage++
-	}
-	if totalOrgs > 0 {
-		color.Green("  [Orgs] ✓ Complete: checked %d organizations", totalOrgs)
-	}
 
 	duration := time.Since(startTime)
 	fmt.Println()
@@ -318,155 +216,6 @@ func fetchAndDisplayActivity(token, username string) {
 	}
 }
 
-func collectFromAccessibleRepos(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity) []PRActivity {
-	// List ALL repositories the authenticated user has access to
-	// This includes: owned repos, org repos, repos with collaborator access, private repos
-	opts := &github.RepositoryListOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
-		Visibility:  "all", // all, public, private
-		Affiliation: "owner,collaborator,organization_member", // all types of access
-		Sort:        "updated",
-	}
-
-	color.Cyan("🔍 Scanning accessible repositories...")
-	repoPage := 1
-	totalRepos := 0
-	totalPRs := 0
-
-	for {
-		color.HiBlack("  [Access] Fetching repo page %d...", repoPage)
-		repos, resp, err := client.Repositories.List(ctx, "", opts)
-		if err != nil {
-			color.Red("Error fetching accessible repositories: %v", err)
-			break
-		}
-
-		color.HiBlack("  [Access] Page %d: checking %d repositories", repoPage, len(repos))
-		totalRepos += len(repos)
-
-		for _, repo := range repos {
-			// Skip archived repos
-			if repo.GetArchived() {
-				continue
-			}
-
-			owner := repo.GetOwner().GetLogin()
-			repoName := repo.GetName()
-
-			prOpts := &github.PullRequestListOptions{
-				State:       "open",
-				ListOptions: github.ListOptions{PerPage: 100},
-			}
-
-			// Paginate through PRs in this repo
-			prPage := 1
-			repoHasPRs := false
-			for {
-				prs, prResp, err := client.PullRequests.List(ctx, owner, repoName, prOpts)
-				if err != nil {
-					break
-				}
-
-				if len(prs) > 0 {
-					if !repoHasPRs {
-						color.HiBlack("    → %s/%s: checking %d open PRs", owner, repoName, len(prs))
-						repoHasPRs = true
-					}
-				}
-
-				for _, pr := range prs {
-					prKey := fmt.Sprintf("%s/%s#%d", owner, repoName, *pr.Number)
-					if seenPRs[prKey] {
-						continue
-					}
-
-					// Check if this PR involves the user in any way
-					involvesUser := false
-					prDetails, _, err := client.PullRequests.Get(ctx, owner, repoName, *pr.Number)
-					if err != nil {
-						continue
-					}
-
-					// Check author
-					if prDetails.User != nil && prDetails.User.GetLogin() == username {
-						involvesUser = true
-					}
-
-					// Check assignees
-					for _, assignee := range prDetails.Assignees {
-						if assignee.GetLogin() == username {
-							involvesUser = true
-							break
-						}
-					}
-
-					// Check requested reviewers
-					for _, reviewer := range prDetails.RequestedReviewers {
-						if reviewer.GetLogin() == username {
-							involvesUser = true
-							break
-						}
-					}
-
-					// Check reviews
-					if !involvesUser {
-						reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repoName, *pr.Number, nil)
-						if err == nil {
-							for _, review := range reviews {
-								if review.User != nil && review.User.GetLogin() == username {
-									involvesUser = true
-									break
-								}
-							}
-						}
-					}
-
-					// Check comments
-					if !involvesUser {
-						comments, _, err := client.Issues.ListComments(ctx, owner, repoName, *pr.Number, nil)
-						if err == nil {
-							for _, comment := range comments {
-								if comment.User != nil && comment.User.GetLogin() == username {
-									involvesUser = true
-									break
-								}
-							}
-						}
-					}
-
-					if involvesUser {
-						seenPRs[prKey] = true
-						activities = append(activities, PRActivity{
-							Label:     "🔍 Access",
-							Owner:     owner,
-							Repo:      repoName,
-							PR:        prDetails,
-							UpdatedAt: prDetails.GetUpdatedAt().Time,
-						})
-						totalPRs++
-					}
-				}
-
-				if prResp.NextPage == 0 {
-					break
-				}
-				prOpts.Page = prResp.NextPage
-				prPage++
-			}
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
-		repoPage++
-	}
-
-	color.Green("  [Access] ✓ Complete: scanned %d repositories, found %d relevant PRs", totalRepos, totalPRs)
-
-	return activities
-}
-
 func collectActivityFromEvents(ctx context.Context, client *github.Client, username string, seenPRs map[string]bool, activities []PRActivity) []PRActivity {
 	// Fetch user's recent events to catch any PR activity
 	opts := &github.ListOptions{PerPage: 100}
@@ -475,7 +224,7 @@ func collectActivityFromEvents(ctx context.Context, client *github.Client, usern
 	totalPRs := 0
 
 	// Get up to 300 recent events (3 pages) to catch recent activity
-	for page := 0; page < 3; page++ {
+	for page := range 3 {
 		color.HiBlack("  [Events] Fetching page %d...", page+1)
 		events, resp, err := client.Activity.ListEventsPerformedByUser(ctx, username, false, opts)
 		if err != nil {
@@ -584,6 +333,7 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 
 		pageResults := 0
 		for _, issue := range result.Issues {
+			// Only process issues that are actually PRs
 			if issue.PullRequestLinks == nil {
 				continue
 			}
@@ -591,8 +341,13 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 			// Parse owner/repo from repository URL
 			repoURL := *issue.RepositoryURL
 			// Extract owner and repo from URL like: https://api.github.com/repos/owner/repo
-			var owner, repo string
-			fmt.Sscanf(repoURL, "https://api.github.com/repos/%s/%s", &owner, &repo)
+			parts := strings.Split(repoURL, "/")
+			if len(parts) < 2 {
+				color.Red("  [%s] Error: Invalid repository URL format: %s", label, repoURL)
+				continue
+			}
+			owner := parts[len(parts)-2]
+			repo := parts[len(parts)-1]
 
 			prKey := fmt.Sprintf("%s/%s#%d", owner, repo, *issue.Number)
 			if !seenPRs[prKey] {
@@ -601,8 +356,18 @@ func collectSearchResults(ctx context.Context, client *github.Client, query, lab
 				// Fetch the actual PR to get more details
 				pr, _, err := client.PullRequests.Get(ctx, owner, repo, *issue.Number)
 				if err != nil {
-					// Skip if we can't get PR details
-					continue
+					// Log the error but still try to show the PR with limited info
+					color.Yellow("  [%s] Warning: Could not fetch details for %s/%s#%d: %v", label, owner, repo, *issue.Number, err)
+
+					// Create a minimal PR object from the issue data
+					pr = &github.PullRequest{
+						Number:    issue.Number,
+						Title:     issue.Title,
+						State:     issue.State,
+						UpdatedAt: issue.UpdatedAt,
+						User:      issue.User,
+						HTMLURL:   issue.HTMLURL,
+					}
 				}
 
 				activities = append(activities, PRActivity{
