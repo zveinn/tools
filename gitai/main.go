@@ -214,9 +214,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
-	if includeClosed {
-		fmt.Println("Including closed items from the last month")
+	if debugMode {
+		fmt.Printf("Monitoring GitHub PR activity for user: %s\n", username)
+		if includeClosed {
+			fmt.Println("Including closed items from the last month")
+		}
 	}
 	if debugMode {
 		fmt.Println("Debug mode enabled")
