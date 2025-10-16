@@ -78,14 +78,39 @@ func main() {
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
-	// Create the pull request
-	draft := true
-
 	// For cross-repository PRs (fork to parent), use owner:branch format for Head
 	headRef := source.Branch
 	if source.Owner != target.Owner || source.Repo != target.Repo {
 		headRef = fmt.Sprintf("%s:%s", source.Owner, source.Branch)
 	}
+
+	// Check if PR already exists
+	existingPR, err := findExistingPR(ctx, client, target.Owner, target.Repo, headRef, target.Branch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking for existing PR: %v\n", err)
+		os.Exit(1)
+	}
+
+	if existingPR != nil {
+		fmt.Printf(" PR already exists: #%d: %s\n", existingPR.GetNumber(), existingPR.GetHTMLURL())
+
+		// If --ai flag is set, only update the description
+		if useAI {
+			fmt.Println(" Generating AI description for existing PR...")
+			err := generateAIDescriptionInteractive(existingPR.GetHTMLURL(), prTitle, source, target)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to generate AI description: %v\n", err)
+			} else {
+				fmt.Printf(" Claude is updating the PR description...\n")
+			}
+		} else {
+			fmt.Println(" No action taken (use --ai flag to update description)")
+		}
+		return
+	}
+
+	// Create the pull request
+	draft := true
 
 	newPR := &github.NewPullRequest{
 		Title:               github.String(prTitle),
@@ -114,47 +139,66 @@ func main() {
 	// If --ai flag is set, generate and update PR description
 	if useAI {
 		fmt.Println(" Generating AI description for PR...")
-		aiDescription, err := generateAIDescription(source, target, prTitle)
+		err := generateAIDescriptionInteractive(pr.GetHTMLURL(), prTitle, source, target)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to generate AI description: %v\n", err)
 		} else {
-			// Update the PR with the AI-generated description
-			updatePR := &github.PullRequest{
-				Body: github.String(aiDescription),
-			}
-			_, _, err = client.PullRequests.Edit(ctx, target.Owner, target.Repo, pr.GetNumber(), updatePR)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to update PR with AI description: %v\n", err)
-			} else {
-				fmt.Printf(" Updated PR with AI-generated description\n")
-			}
+			fmt.Printf(" Claude is updating the PR description...\n")
 		}
 	}
 }
 
-func generateAIDescription(source, target *RepoBranch, prTitle string) (string, error) {
-	// Build the prompt for Claude
+func findExistingPR(ctx context.Context, client *github.Client, owner, repo, head, base string) (*github.PullRequest, error) {
+	// List open pull requests with matching head and base branches
+	opts := &github.PullRequestListOptions{
+		State: "open",
+		Head:  head,
+		Base:  base,
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	}
+
+	prs, _, err := client.PullRequests.List(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return the first matching PR (there should only be one)
+	if len(prs) > 0 {
+		return prs[0], nil
+	}
+
+	return nil, nil
+}
+
+func generateAIDescriptionInteractive(prURL, prTitle string, source, target *RepoBranch) error {
+	// Build the prompt for Claude in interactive mode
 	prompt := fmt.Sprintf(
-		"Generate a concise and professional pull request description for the following PR:\n\n"+
-			"Title: %s\n"+
+		"Please use the gh CLI tool to update the description for the GitHub PR at %s\n\n"+
+			"PR Title: %s\n"+
 			"Source branch: %s\n"+
 			"Target branch: %s\n\n"+
-			"The description should include:\n"+
+			"Generate a concise and professional pull request description that includes:\n"+
 			"- A brief summary of changes\n"+
 			"- Key improvements or features\n"+
 			"- Any relevant context\n\n"+
-			"Keep it professional and under 300 words. Once the description is complete, apply the approriate labels",
-		prTitle, source.Branch, target.Branch,
+			"Keep it professional and under 300 words. Use 'gh pr edit' to update the PR description directly with your generated description. Once you are done editing the description, please apply the appropriate labels.",
+		prURL, prTitle, source.Branch, target.Branch,
 	)
 
-	// Call claude CLI tool
-	cmd := exec.Command("claude", "-p", prompt)
-	output, err := cmd.CombinedOutput()
+	// Call claude CLI tool with the prompt, allowing it to use tools
+	cmd := exec.Command("claude", prompt)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("failed to execute claude CLI: %w (output: %s)", err, string(output))
+		return fmt.Errorf("failed to execute claude CLI: %w", err)
 	}
 
-	return strings.TrimSpace(string(output)), nil
+	return nil
 }
 
 func parseRepoBranch(arg string) (*RepoBranch, error) {
