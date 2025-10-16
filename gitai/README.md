@@ -47,7 +47,7 @@ export GITHUB_USERNAME="your_username"
 ```
 
 **Option 2: Configuration File**
-Create `~/.secret/.gitai.env`:
+Create `~/.github-feed/.env`:
 ```bash
 GITHUB_TOKEN=your_token_here
 GITHUB_USERNAME=your_username

@@ -1,4 +1,4 @@
-module github.com/sveinn/gitai
+module github.com/sveinn/tools/podman-multitool
 
 go 1.25
 
