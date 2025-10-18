@@ -119,6 +119,7 @@ func main() {
 		Draft:               &draft,
 		MaintainerCanModify: github.Bool(true),
 	}
+	fmt.Println(newPR)
 
 	pr, _, err := client.PullRequests.Create(ctx, target.Owner, target.Repo, newPR)
 	if err != nil {
@@ -149,10 +150,10 @@ func main() {
 }
 
 func findExistingPR(ctx context.Context, client *github.Client, owner, repo, head, base string) (*github.PullRequest, error) {
-	// List open pull requests with matching head and base branches
+	// List all open pull requests for the base branch
+	// We'll filter manually because GitHub's Head filter can be inconsistent
 	opts := &github.PullRequestListOptions{
 		State: "open",
-		Head:  head,
 		Base:  base,
 		ListOptions: github.ListOptions{
 			PerPage: 100,
@@ -164,9 +165,28 @@ func findExistingPR(ctx context.Context, client *github.Client, owner, repo, hea
 		return nil, err
 	}
 
-	// Return the first matching PR (there should only be one)
-	if len(prs) > 0 {
-		return prs[0], nil
+	// Manually filter for matching head branch
+	// Handle both "branch" and "owner:branch" formats
+	for _, pr := range prs {
+		prHead := pr.GetHead()
+		if prHead == nil {
+			continue
+		}
+
+		// Build the PR's head reference in the same format we're searching for
+		prHeadRef := prHead.GetRef()
+		if prHead.GetRepo() != nil && prHead.GetRepo().GetOwner() != nil {
+			prHeadOwner := prHead.GetRepo().GetOwner().GetLogin()
+			// If it's a cross-repo PR, use owner:branch format
+			if prHeadOwner != owner {
+				prHeadRef = fmt.Sprintf("%s:%s", prHeadOwner, prHead.GetRef())
+			}
+		}
+
+		// Check if this PR matches our head reference
+		if prHeadRef == head {
+			return pr, nil
+		}
 	}
 
 	return nil, nil
@@ -183,7 +203,7 @@ func generateAIDescriptionInteractive(prURL, prTitle string, source, target *Rep
 			"- A brief summary of changes\n"+
 			"- Key improvements or features\n"+
 			"- Any relevant context\n\n"+
-			"Keep it professional and under 300 words. Use 'gh pr edit' to update the PR description directly with your generated description. Once you are done editing the description, please apply the appropriate labels.",
+			"Keep it professional and under 300 words. Use the github cli tool (gh) to update the PR description with the new description. Once you are done editing the description, please apply the appropriate labels from the already existing labels (do no make new ones).",
 		prURL, prTitle, source.Branch, target.Branch,
 	)
 
