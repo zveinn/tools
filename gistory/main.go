@@ -94,22 +94,19 @@ func deduplicateHistory(history []string) []string {
 func (ha *HistoryApp) buildUI() {
 	// Create input field
 	inputBox := tview.NewInputField().
-		SetLabel("[yellow]❯[-] ").
+		SetLabel("❯ ").
 		SetFieldWidth(0).
 		SetChangedFunc(func(text string) {
 			ha.searchQuery = text
 			ha.filterHistory(text)
 		})
 
-	// Set colors to ensure text is visible - use default terminal background
-	inputBox.SetFieldTextColor(tcell.ColorWhite)
+	// Force colors - use RGB to ensure visibility
+	inputBox.SetLabelColor(tcell.NewRGBColor(255, 255, 0)). // Yellow label
+		SetFieldTextColor(tcell.NewRGBColor(255, 255, 255)). // White text
+		SetFieldBackgroundColor(tcell.NewRGBColor(40, 40, 40)) // Dark gray background
 
 	ha.inputField = inputBox
-
-	// Wrap input in a frame
-	inputFrame := tview.NewFrame(ha.inputField).
-		SetBorders(0, 0, 0, 0, 0, 0).
-		AddText("", false, tview.AlignLeft, tcell.ColorDefault)
 
 	// Create list with custom styling
 	ha.list = tview.NewList().
@@ -188,7 +185,7 @@ func (ha *HistoryApp) buildUI() {
 	// Create main layout
 	mainContent := tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(inputFrame, 1, 0, true).
+		AddItem(ha.inputField, 1, 0, true).
 		AddItem(listWithBorder, 0, 1, false).
 		AddItem(ha.statusBar, 2, 0, false)
 
