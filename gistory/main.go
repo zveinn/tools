@@ -101,10 +101,8 @@ func (ha *HistoryApp) buildUI() {
 			ha.filterHistory(text)
 		})
 
-	// Set colors to ensure text is visible
-	inputBox.SetFieldTextColor(tcell.ColorWhite).
-		SetFieldBackgroundColor(tcell.ColorBlack).
-		SetLabelColor(tcell.ColorYellow)
+	// Set colors to ensure text is visible - use default terminal background
+	inputBox.SetFieldTextColor(tcell.ColorWhite)
 
 	ha.inputField = inputBox
 
