@@ -114,8 +114,8 @@ func (ha *HistoryApp) buildUI() {
 		SetHighlightFullLine(true)
 
 	ha.list.SetMainTextColor(tcell.ColorWhite).
-		SetSelectedTextColor(tcell.ColorBlack).
-		SetSelectedBackgroundColor(tcell.NewRGBColor(0, 200, 200)).
+		SetSelectedTextColor(tcell.ColorWhite).
+		SetSelectedBackgroundColor(tcell.NewRGBColor(0, 0, 139)). // Dark blue
 		SetShortcutColor(tcell.ColorGreen)
 
 	// Create status bar with better styling
@@ -278,8 +278,8 @@ func highlightMatches(text, pattern string) string {
 
 	for i := 0; i < len(text); i++ {
 		if patternIdx < len(lowerPattern) && lowerText[i] == lowerPattern[patternIdx] {
-			// Highlight matched character
-			result.WriteString("[yellow::b]")
+			// Highlight matched character in green
+			result.WriteString("[green::b]")
 			result.WriteByte(text[i])
 			result.WriteString("[white::-]")
 			patternIdx++
