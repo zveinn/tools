@@ -18,6 +18,8 @@ type HistoryApp struct {
 	history     []string
 	filtered    []string
 	statusBar   *tview.TextView
+	header      *tview.TextView
+	searchQuery string
 }
 
 func main() {
@@ -91,22 +93,40 @@ func deduplicateHistory(history []string) []string {
 
 func (ha *HistoryApp) buildUI() {
 	// Create input field
-	ha.inputField = tview.NewInputField().
-		SetLabel("Search: ").
+	inputBox := tview.NewInputField().
+		SetLabel("[yellow]❯[-] ").
 		SetFieldWidth(0).
 		SetChangedFunc(func(text string) {
+			ha.searchQuery = text
 			ha.filterHistory(text)
 		})
 
-	// Create list
+	// Set colors to ensure text is visible
+	inputBox.SetFieldTextColor(tcell.ColorWhite).
+		SetFieldBackgroundColor(tcell.ColorBlack).
+		SetLabelColor(tcell.ColorYellow)
+
+	ha.inputField = inputBox
+
+	// Wrap input in a frame
+	inputFrame := tview.NewFrame(ha.inputField).
+		SetBorders(0, 0, 0, 0, 0, 0).
+		AddText("", false, tview.AlignLeft, tcell.ColorDefault)
+
+	// Create list with custom styling
 	ha.list = tview.NewList().
 		ShowSecondaryText(false).
 		SetHighlightFullLine(true)
 
-	// Create status bar
+	ha.list.SetMainTextColor(tcell.ColorWhite).
+		SetSelectedTextColor(tcell.ColorBlack).
+		SetSelectedBackgroundColor(tcell.NewRGBColor(0, 200, 200)).
+		SetShortcutColor(tcell.ColorGreen)
+
+	// Create status bar with better styling
 	ha.statusBar = tview.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+		SetTextAlign(tview.AlignCenter)
 
 	// Initial population
 	ha.updateList()
@@ -155,12 +175,30 @@ func (ha *HistoryApp) buildUI() {
 		ha.selectCommand(index)
 	})
 
-	// Create layout
-	flex := tview.NewFlex().
+	// Create list container with border
+	listContainer := tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(ha.inputField, 1, 0, true).
-		AddItem(ha.list, 0, 1, false).
-		AddItem(ha.statusBar, 1, 0, false)
+		AddItem(ha.list, 0, 1, false)
+
+	listFrame := tview.NewFrame(listContainer).
+		SetBorders(1, 1, 2, 2, 1, 1)
+
+	listWithBorder := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(listFrame, 0, 1, false)
+
+	// Create main layout
+	mainContent := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(inputFrame, 1, 0, true).
+		AddItem(listWithBorder, 0, 1, false).
+		AddItem(ha.statusBar, 2, 0, false)
+
+	// Add padding to the sides (1 char only)
+	flex := tview.NewFlex().
+		AddItem(nil, 1, 0, false).
+		AddItem(mainContent, 0, 1, true).
+		AddItem(nil, 1, 0, false)
 
 	ha.app.SetRoot(flex, true)
 	ha.app.SetFocus(ha.inputField)
@@ -205,18 +243,64 @@ func (ha *HistoryApp) updateList() {
 
 	for i := 0; i < maxItems; i++ {
 		cmd := ha.filtered[i]
+		displayCmd := cmd
+
+		// Highlight matching characters if there's a search query
+		if ha.searchQuery != "" {
+			displayCmd = highlightMatches(cmd, ha.searchQuery)
+		}
+
 		// Truncate long commands
 		if len(cmd) > 200 {
-			cmd = cmd[:200] + "..."
+			displayCmd = displayCmd[:200] + "[grey]...[white]"
 		}
-		ha.list.AddItem(cmd, "", 0, nil)
+
+		// Add line number prefix
+		prefix := fmt.Sprintf("[grey]%3d[white] │ ", i+1)
+		ha.list.AddItem(prefix+displayCmd, "", 0, nil)
 	}
+}
+
+func highlightMatches(text, pattern string) string {
+	if pattern == "" {
+		return text
+	}
+
+	lowerText := strings.ToLower(text)
+	lowerPattern := strings.ToLower(pattern)
+
+	var result strings.Builder
+	patternIdx := 0
+
+	for i := 0; i < len(text); i++ {
+		if patternIdx < len(lowerPattern) && lowerText[i] == lowerPattern[patternIdx] {
+			// Highlight matched character
+			result.WriteString("[yellow::b]")
+			result.WriteByte(text[i])
+			result.WriteString("[white::-]")
+			patternIdx++
+		} else {
+			result.WriteByte(text[i])
+		}
+	}
+
+	return result.String()
 }
 
 func (ha *HistoryApp) updateStatus() {
 	total := len(ha.history)
 	shown := len(ha.filtered)
-	status := fmt.Sprintf(" %d/%d commands | [yellow]Enter[white] to select | [yellow]Esc[white] to cancel", shown, total)
+
+	var statusMsg string
+	if shown == 0 {
+		statusMsg = "[red]✗ No matches found"
+	} else if shown == total {
+		statusMsg = fmt.Sprintf("[green]● [white]%d commands", total)
+	} else {
+		statusMsg = fmt.Sprintf("[cyan]● [white]%d[grey]/[white]%d commands", shown, total)
+	}
+
+	status := fmt.Sprintf("\n[::b]%s  [grey]│  [yellow]↵[white] select  [grey]│  [yellow]↑↓[white] navigate  [grey]│  [yellow]Esc[white] cancel", statusMsg)
 	ha.statusBar.SetText(status)
 }
 
