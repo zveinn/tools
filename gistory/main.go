@@ -94,7 +94,7 @@ func deduplicateHistory(history []string) []string {
 func (ha *HistoryApp) buildUI() {
 	// Create input field
 	inputBox := tview.NewInputField().
-		SetLabel("❯ ").
+		SetLabel("> ").
 		SetFieldWidth(0).
 		SetChangedFunc(func(text string) {
 			ha.searchQuery = text
@@ -102,7 +102,7 @@ func (ha *HistoryApp) buildUI() {
 		})
 
 	// Force colors - use RGB to ensure visibility
-	inputBox.SetLabelColor(tcell.NewRGBColor(255, 255, 0)). // Yellow label
+	inputBox.SetLabelColor(tcell.NewRGBColor(0, 255, 0)). // Green label
 		SetFieldTextColor(tcell.NewRGBColor(255, 255, 255)). // White text
 		SetFieldBackgroundColor(tcell.NewRGBColor(0, 0, 0)) // Black background
 
