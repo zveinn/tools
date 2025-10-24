@@ -118,14 +118,8 @@ func (ha *HistoryApp) buildUI() {
 		SetSelectedBackgroundColor(tcell.NewRGBColor(0, 0, 139)). // Dark blue
 		SetShortcutColor(tcell.ColorGreen)
 
-	// Create status bar with better styling
-	ha.statusBar = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter)
-
 	// Initial population
 	ha.updateList()
-	ha.updateStatus()
 
 	// Handle input field keys
 	ha.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -197,8 +191,7 @@ func (ha *HistoryApp) buildUI() {
 	mainContent := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(ha.inputField, 1, 0, true).
-		AddItem(listWithBorder, 0, 1, false).
-		AddItem(ha.statusBar, 2, 0, false)
+		AddItem(listWithBorder, 0, 1, false)
 
 	// Add padding to the sides (1 char only)
 	flex := tview.NewFlex().
@@ -225,7 +218,6 @@ func (ha *HistoryApp) filterHistory(query string) {
 	}
 
 	ha.updateList()
-	ha.updateStatus()
 }
 
 func fuzzyMatch(text, pattern string) bool {
@@ -300,9 +292,9 @@ func (ha *HistoryApp) updateStatus() {
 	if shown == 0 {
 		statusMsg = "[red]✗ No matches found"
 	} else if shown == total {
-		statusMsg = fmt.Sprintf("[green]● [white]%d commands", total)
+		statusMsg = fmt.Sprintf("[white]%d commands", total)
 	} else {
-		statusMsg = fmt.Sprintf("[cyan]● [white]%d[grey]/[white]%d commands", shown, total)
+		statusMsg = fmt.Sprintf("[white]%d[grey]/[white]%d commands", shown, total)
 	}
 
 	status := fmt.Sprintf("\n[::b]%s  [grey]│  [green]↵[white] select  [grey]│  [green]↑↓[white] navigate  [grey]│  [green]Esc[white] cancel", statusMsg)
