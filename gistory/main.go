@@ -159,12 +159,19 @@ func (ha *HistoryApp) buildUI() {
 			ha.app.Stop()
 			return nil
 		case tcell.KeyRune:
-			// Any character, go back to input
+			// Any character, add it to input and go back
+			currentText := ha.inputField.GetText()
+			ha.inputField.SetText(currentText + string(event.Rune()))
 			ha.app.SetFocus(ha.inputField)
-			return event
+			return nil
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
+			// Remove last character from input
+			currentText := ha.inputField.GetText()
+			if len(currentText) > 0 {
+				ha.inputField.SetText(currentText[:len(currentText)-1])
+			}
 			ha.app.SetFocus(ha.inputField)
-			return event
+			return nil
 		}
 		return event
 	})
