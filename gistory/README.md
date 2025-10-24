@@ -47,8 +47,26 @@ gistory
 
 To replace Ctrl+R with gistory, add this to your `~/.bashrc`:
 
+### Option 1: Execute immediately (recommended)
+
 ```bash
-# Bind Ctrl+R to gistory
+# Bind Ctrl+R to gistory - auto-execute selected command
+bind -x '"\C-r": __gistory'
+
+__gistory() {
+    local selected
+    selected=$(gistory)
+    if [ -n "$selected" ]; then
+        history -s "$selected"  # Add to history
+        eval "$selected"         # Execute immediately
+    fi
+}
+```
+
+### Option 2: Insert into command line (edit before running)
+
+```bash
+# Bind Ctrl+R to gistory - insert into readline buffer
 bind -x '"\C-r": __gistory'
 
 __gistory() {
@@ -75,7 +93,7 @@ Now pressing Ctrl+R will launch gistory instead of the default reverse search!
 2. Deduplicates commands (keeps most recent)
 3. Provides interactive fuzzy search interface
 4. Outputs selected command to stdout
-5. Bash integration inserts the selected command into your current line
+5. Bash integration either executes it immediately or inserts it into your command line
 
 ## Requirements
 
