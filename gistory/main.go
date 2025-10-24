@@ -305,7 +305,7 @@ func (ha *HistoryApp) updateStatus() {
 		statusMsg = fmt.Sprintf("[cyan]● [white]%d[grey]/[white]%d commands", shown, total)
 	}
 
-	status := fmt.Sprintf("\n[::b]%s  [grey]│  [yellow]↵[white] select  [grey]│  [yellow]↑↓[white] navigate  [grey]│  [yellow]Esc[white] cancel", statusMsg)
+	status := fmt.Sprintf("\n[::b]%s  [grey]│  [green]↵[white] select  [grey]│  [green]↑↓[white] navigate  [grey]│  [green]Esc[white] cancel", statusMsg)
 	ha.statusBar.SetText(status)
 }
 
