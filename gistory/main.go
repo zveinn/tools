@@ -261,7 +261,8 @@ func (ha *HistoryApp) updateList() {
 			displayCmd = displayCmd[:200] + "[grey]...[white]"
 		}
 
-		ha.list.AddItem(displayCmd, "", 0, nil)
+		// Add 2 char padding to align with search input
+		ha.list.AddItem("  "+displayCmd, "", 0, nil)
 	}
 }
 
