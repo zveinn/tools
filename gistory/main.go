@@ -170,13 +170,13 @@ func (ha *HistoryApp) buildUI() {
 		ha.selectCommand(index)
 	})
 
-	// Create list container with border
+	// Create list container with minimal border (1 char padding)
 	listContainer := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(ha.list, 0, 1, false)
 
 	listFrame := tview.NewFrame(listContainer).
-		SetBorders(1, 1, 2, 2, 1, 1)
+		SetBorders(0, 0, 1, 0, 0, 0)
 
 	listWithBorder := tview.NewFlex().
 		SetDirection(tview.FlexRow).
@@ -250,9 +250,7 @@ func (ha *HistoryApp) updateList() {
 			displayCmd = displayCmd[:200] + "[grey]...[white]"
 		}
 
-		// Add line number prefix
-		prefix := fmt.Sprintf("[grey]%3d[white] │ ", i+1)
-		ha.list.AddItem(prefix+displayCmd, "", 0, nil)
+		ha.list.AddItem(displayCmd, "", 0, nil)
 	}
 }
 
