@@ -104,7 +104,7 @@ func (ha *HistoryApp) buildUI() {
 	// Force colors - use RGB to ensure visibility
 	inputBox.SetLabelColor(tcell.NewRGBColor(255, 255, 0)). // Yellow label
 		SetFieldTextColor(tcell.NewRGBColor(255, 255, 255)). // White text
-		SetFieldBackgroundColor(tcell.NewRGBColor(40, 40, 40)) // Dark gray background
+		SetFieldBackgroundColor(tcell.NewRGBColor(0, 0, 0)) // Black background
 
 	ha.inputField = inputBox
 
