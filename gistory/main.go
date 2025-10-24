@@ -134,6 +134,10 @@ func (ha *HistoryApp) buildUI() {
 			ha.app.Stop()
 			return nil
 		case tcell.KeyDown, tcell.KeyCtrlN:
+			// Move to second item when first pressing down
+			if len(ha.filtered) > 1 {
+				ha.list.SetCurrentItem(1)
+			}
 			ha.app.SetFocus(ha.list)
 			return nil
 		case tcell.KeyUp, tcell.KeyCtrlP:
