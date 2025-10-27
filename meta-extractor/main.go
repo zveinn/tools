@@ -15,7 +15,7 @@ import (
 
 const maxFileSize = 200 * 1024 * 1024 // 200MB in bytes
 
-var ErrMaxSizeReached = errors.New("maximum size limit reached")
+var ErrMaxFilesReached = errors.New("maximum number of files reached")
 
 type RotatingWriter struct {
 	outDir            string
@@ -24,7 +24,7 @@ type RotatingWriter struct {
 	currentSize       int64
 	fileNumber        int
 	totalBytesWritten int64
-	maxSize           int64
+	maxFiles          int
 	lastWrittenPath   string
 }
 
@@ -221,7 +221,7 @@ func calculateDeltaPath(lastPath, currentPath string) string {
 	return fmt.Sprintf("-%d:%s", levelsUp, newSuffix)
 }
 
-func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
+func NewRotatingWriter(outDir string, maxFiles int) (*RotatingWriter, error) {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
@@ -230,7 +230,7 @@ func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
 	rw := &RotatingWriter{
 		outDir:     outDir,
 		fileNumber: 1,
-		maxSize:    maxSize,
+		maxFiles:   maxFiles,
 	}
 
 	// Create the first file
@@ -242,6 +242,11 @@ func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
 }
 
 func (rw *RotatingWriter) rotate() error {
+	// Check if we've reached the maximum number of files
+	if rw.maxFiles > 0 && rw.fileNumber > rw.maxFiles {
+		return ErrMaxFilesReached
+	}
+
 	// Close and compress current file if open
 	if rw.currentFile != nil {
 		if err := rw.currentFile.Close(); err != nil {
@@ -277,11 +282,6 @@ func (rw *RotatingWriter) WritePath(fullPath string) error {
 	// Calculate delta path relative to last written path
 	deltaPath := calculateDeltaPath(rw.lastWrittenPath, fullPath)
 	lineSize := int64(len(deltaPath) + 1) // +1 for newline
-
-	// Check if we've hit the max size limit
-	if rw.maxSize > 0 && rw.totalBytesWritten+lineSize > rw.maxSize {
-		return ErrMaxSizeReached
-	}
 
 	// Check if we need to rotate
 	if rw.currentSize+lineSize > maxFileSize {
@@ -387,7 +387,7 @@ func main() {
 	// Parse command-line flags
 	dir := flag.String("dir", ".", "Directory to walk")
 	outDir := flag.String("outDir", ".", "Output directory for log files")
-	maxSizeStr := flag.String("maxSize", "", "Maximum total size to write (e.g., 1GB, 500MB, 2GB)")
+	numFiles := flag.Int("numFiles", 0, "Maximum number of files to write (0 = unlimited)")
 	inflateInput := flag.String("inflate", "", "Inflate mode: input compressed log file to expand")
 	inflateOutput := flag.String("output", "", "Inflate mode: output file for expanded paths")
 	flag.Parse()
@@ -415,15 +415,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse max size
-	maxSize, err := parseSize(*maxSizeStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing maxSize: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Create rotating writer
-	writer, err := NewRotatingWriter(*outDir, maxSize)
+	writer, err := NewRotatingWriter(*outDir, *numFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating rotating writer: %v\n", err)
 		os.Exit(1)
@@ -432,8 +425,8 @@ func main() {
 
 	// Walk the directory
 	if err := walkDirectory(*dir, writer); err != nil {
-		if errors.Is(err, ErrMaxSizeReached) {
-			fmt.Fprintf(os.Stderr, "Maximum size limit reached. Total bytes written: %d\n", writer.totalBytesWritten)
+		if errors.Is(err, ErrMaxFilesReached) {
+			fmt.Fprintf(os.Stderr, "Maximum file limit reached (%d files). Total bytes written: %d\n", *numFiles, writer.totalBytesWritten)
 			os.Exit(0)
 		}
 		fmt.Fprintf(os.Stderr, "Error walking directory: %v\n", err)
