@@ -18,11 +18,11 @@ const maxFileSize = 200 * 1024 * 1024 // 200MB in bytes
 var ErrMaxFilesReached = errors.New("maximum number of files reached")
 
 type MaxFilesError struct {
-	LastDir string
+	LastPath string
 }
 
 func (e *MaxFilesError) Error() string {
-	return fmt.Sprintf("maximum number of files reached, last directory: %s", e.LastDir)
+	return fmt.Sprintf("maximum number of files reached, last path: %s", e.LastPath)
 }
 
 func (e *MaxFilesError) Is(target error) bool {
@@ -465,18 +465,18 @@ func main() {
 	}
 
 	// Check if we're resuming
-	var resumeDir string
+	var resumePath string
 	var startFileNum int = 1
-	resumePath := filepath.Join(*outDir, "resume.path")
+	resumeFilePath := filepath.Join(*outDir, "resume.path")
 
 	if *resume {
-		data, err := os.ReadFile(resumePath)
+		data, err := os.ReadFile(resumeFilePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading resume.path: %v\n", err)
 			os.Exit(1)
 		}
-		resumeDir = strings.TrimSpace(string(data))
-		fmt.Fprintf(os.Stderr, "Resuming from directory: %s\n", resumeDir)
+		resumePath = strings.TrimSpace(string(data))
+		fmt.Fprintf(os.Stderr, "Resuming from path: %s\n", resumePath)
 
 		// Find the last file number to continue from
 		lastNum, err := findLastFileNumber(*outDir)
@@ -497,16 +497,16 @@ func main() {
 	defer writer.Close()
 
 	// Walk the directory
-	if err := walkDirectory(*dir, writer, resumeDir); err != nil {
+	if err := walkDirectory(*dir, writer, resumePath); err != nil {
 		if errors.Is(err, ErrMaxFilesReached) {
-			// Extract the last directory from the error
+			// Extract the last path from the error
 			var maxFilesErr *MaxFilesError
 			if errors.As(err, &maxFilesErr) {
-				// Write the last directory to resume.path
-				if writeErr := os.WriteFile(resumePath, []byte(maxFilesErr.LastDir), 0644); writeErr != nil {
+				// Write the last path to resume.path
+				if writeErr := os.WriteFile(resumeFilePath, []byte(maxFilesErr.LastPath), 0644); writeErr != nil {
 					fmt.Fprintf(os.Stderr, "Error writing resume.path: %v\n", writeErr)
 				} else {
-					fmt.Fprintf(os.Stderr, "Saved resume point to: %s\n", resumePath)
+					fmt.Fprintf(os.Stderr, "Saved resume point to: %s\n", resumeFilePath)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "Maximum file limit reached (%d files). Total bytes written: %d\n", *numFiles, writer.totalBytesWritten)
@@ -519,8 +519,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Completed. Total bytes written: %d\n", writer.totalBytesWritten)
 }
 
-func walkDirectory(root string, writer *RotatingWriter, resumeDir string) error {
+func walkDirectory(root string, writer *RotatingWriter, resumePath string) error {
 	var lastDir string
+	var currentPath string
+	resumeReached := resumePath == "" // If no resume path, start immediately
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -528,19 +530,26 @@ func walkDirectory(root string, writer *RotatingWriter, resumeDir string) error 
 			return err
 		}
 
+		// Track current path for resume
+		currentPath = path
+
+		// Check if we've reached the resume point
+		if !resumeReached {
+			if path == resumePath {
+				resumeReached = true
+				fmt.Fprintf(os.Stderr, "Resume point reached, continuing from: %s\n", path)
+			}
+			return nil // Skip until we reach the resume point
+		}
+
 		if !d.IsDir() {
 			dir := filepath.Dir(path)
 
-			// Skip directories that are <= resumeDir (if resuming)
-			if resumeDir != "" && dir <= resumeDir {
-				return nil
-			}
-
 			if dir != lastDir {
 				if err := writer.WritePath(path); err != nil {
-					// If we hit max files, wrap error with last directory
+					// If we hit max files, wrap error with current path
 					if errors.Is(err, ErrMaxFilesReached) {
-						return &MaxFilesError{LastDir: dir}
+						return &MaxFilesError{LastPath: currentPath}
 					}
 					return fmt.Errorf("failed to write path: %w", err)
 				}
@@ -551,9 +560,9 @@ func walkDirectory(root string, writer *RotatingWriter, resumeDir string) error 
 		return nil
 	})
 
-	// Wrap any ErrMaxFilesReached with the last directory we processed
+	// Wrap any ErrMaxFilesReached with the last path we were at
 	if err != nil && errors.Is(err, ErrMaxFilesReached) {
-		return &MaxFilesError{LastDir: lastDir}
+		return &MaxFilesError{LastPath: currentPath}
 	}
 
 	return err
