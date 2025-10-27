@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,11 +20,55 @@ var ErrMaxSizeReached = errors.New("maximum size limit reached")
 type RotatingWriter struct {
 	outDir            string
 	currentFile       *os.File
+	currentFilePath   string
 	currentSize       int64
 	fileNumber        int
 	totalBytesWritten int64
 	maxSize           int64
 	lastWrittenPath   string
+}
+
+// compressFile compresses a file using gzip and removes the original
+func compressFile(filePath string) error {
+	// Open source file
+	srcFile, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file for compression: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Create compressed file
+	gzPath := filePath + ".gz"
+	gzFile, err := os.Create(gzPath)
+	if err != nil {
+		return fmt.Errorf("failed to create compressed file: %w", err)
+	}
+	defer gzFile.Close()
+
+	// Create gzip writer
+	gzWriter := gzip.NewWriter(gzFile)
+	defer gzWriter.Close()
+
+	// Copy data
+	if _, err := io.Copy(gzWriter, srcFile); err != nil {
+		return fmt.Errorf("failed to compress data: %w", err)
+	}
+
+	// Close gzip writer to flush
+	if err := gzWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	// Close files before removing
+	srcFile.Close()
+	gzFile.Close()
+
+	// Remove original file
+	if err := os.Remove(filePath); err != nil {
+		return fmt.Errorf("failed to remove original file: %w", err)
+	}
+
+	return nil
 }
 
 // parseSize parses human-readable sizes like "1GB", "500MB", "2GB"
@@ -196,10 +242,19 @@ func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
 }
 
 func (rw *RotatingWriter) rotate() error {
-	// Close current file if open
+	// Close and compress current file if open
 	if rw.currentFile != nil {
 		if err := rw.currentFile.Close(); err != nil {
 			return fmt.Errorf("failed to close current file: %w", err)
+		}
+
+		// Compress the file we just closed
+		if rw.currentFilePath != "" {
+			fmt.Fprintf(os.Stderr, "Compressing %s...\n", rw.currentFilePath)
+			if err := compressFile(rw.currentFilePath); err != nil {
+				return fmt.Errorf("failed to compress file: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Compressed to %s.gz\n", rw.currentFilePath)
 		}
 	}
 
@@ -211,6 +266,7 @@ func (rw *RotatingWriter) rotate() error {
 	}
 
 	rw.currentFile = file
+	rw.currentFilePath = filename
 	rw.currentSize = 0
 	rw.fileNumber++
 
@@ -248,12 +304,25 @@ func (rw *RotatingWriter) WritePath(fullPath string) error {
 
 func (rw *RotatingWriter) Close() error {
 	if rw.currentFile != nil {
-		return rw.currentFile.Close()
+		// Close the file
+		if err := rw.currentFile.Close(); err != nil {
+			return err
+		}
+
+		// Compress the final file
+		if rw.currentFilePath != "" {
+			fmt.Fprintf(os.Stderr, "Compressing final file %s...\n", rw.currentFilePath)
+			if err := compressFile(rw.currentFilePath); err != nil {
+				return fmt.Errorf("failed to compress final file: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "Compressed to %s.gz\n", rw.currentFilePath)
+		}
 	}
 	return nil
 }
 
 // inflateFile reads a compressed log file and writes expanded paths to output
+// Automatically handles both .gz compressed and uncompressed files
 func inflateFile(inputPath, outputPath string) error {
 	// Open input file
 	inputFile, err := os.Open(inputPath)
@@ -262,6 +331,19 @@ func inflateFile(inputPath, outputPath string) error {
 	}
 	defer inputFile.Close()
 
+	// Create a reader that handles both gzip and plain files
+	var reader io.Reader = inputFile
+
+	// Check if file is gzipped by extension
+	if strings.HasSuffix(inputPath, ".gz") {
+		gzReader, err := gzip.NewReader(inputFile)
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer gzReader.Close()
+		reader = gzReader
+	}
+
 	// Create output file
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
@@ -269,7 +351,7 @@ func inflateFile(inputPath, outputPath string) error {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(inputFile)
+	scanner := bufio.NewScanner(reader)
 	writer := bufio.NewWriter(outputFile)
 	defer writer.Flush()
 
