@@ -235,7 +235,7 @@ func calculateDeltaPath(lastPath, currentPath string) string {
 
 func NewRotatingWriter(outDir string, maxFiles int, startFileNum int) (*RotatingWriter, error) {
 	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(outDir, 0755); err != nil {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -478,15 +478,16 @@ func main() {
 		resumePath = strings.TrimSpace(string(data))
 		fmt.Fprintf(os.Stderr, "Resuming from path: %s\n", resumePath)
 
-		// Find the last file number to continue from
-		lastNum, err := findLastFileNumber(*outDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error finding last file number: %v\n", err)
-			os.Exit(1)
-		}
-		startFileNum = lastNum + 1
 		fmt.Fprintf(os.Stderr, "Continuing from file number: %d\n", startFileNum)
 	}
+
+	// Find the last file number to continue from
+	lastNum, err := findLastFileNumber(*outDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding last file number: %v\n", err)
+		os.Exit(1)
+	}
+	startFileNum = lastNum + 1
 
 	// Create rotating writer
 	writer, err := NewRotatingWriter(*outDir, *numFiles, startFileNum)
@@ -503,17 +504,17 @@ func main() {
 			var maxFilesErr *MaxFilesError
 			if errors.As(err, &maxFilesErr) {
 				// Write the last path to resume.path
-				if writeErr := os.WriteFile(resumeFilePath, []byte(maxFilesErr.LastPath), 0644); writeErr != nil {
+				if writeErr := os.WriteFile(resumeFilePath, []byte(maxFilesErr.LastPath), 0o644); writeErr != nil {
 					fmt.Fprintf(os.Stderr, "Error writing resume.path: %v\n", writeErr)
 				} else {
 					fmt.Fprintf(os.Stderr, "Saved resume point to: %s\n", resumeFilePath)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "Maximum file limit reached (%d files). Total bytes written: %d\n", *numFiles, writer.totalBytesWritten)
-			os.Exit(0)
+			return
 		}
 		fmt.Fprintf(os.Stderr, "Error walking directory: %v\n", err)
-		os.Exit(1)
+		return
 	}
 
 	fmt.Fprintf(os.Stderr, "Completed. Total bytes written: %d\n", writer.totalBytesWritten)
