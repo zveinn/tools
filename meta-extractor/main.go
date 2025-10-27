@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -527,8 +528,7 @@ func walkDirectory(root string, writer *RotatingWriter, resumePath string) error
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error accessing path %s: %v\n", path, err)
-			return err
+			return fs.SkipDir
 		}
 
 		// Track current path for resume
