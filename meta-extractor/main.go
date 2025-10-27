@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ type RotatingWriter struct {
 	fileNumber        int
 	totalBytesWritten int64
 	maxSize           int64
+	lastWrittenPath   string
 }
 
 // parseSize parses human-readable sizes like "1GB", "500MB", "2GB"
@@ -72,6 +74,107 @@ func parseSize(sizeStr string) (int64, error) {
 	return int64(num * float64(multiplier)), nil
 }
 
+// reconstructPath takes a delta path and the last full path, and reconstructs the full path
+func reconstructPath(lastPath, deltaPath string) (string, error) {
+	// If this is the first path or a relative path without delta marker
+	if lastPath == "" || !strings.HasPrefix(deltaPath, "-") {
+		// Check if it's a relative path from last directory
+		if lastPath != "" && !strings.HasPrefix(deltaPath, "-") {
+			lastDir := filepath.Dir(lastPath)
+			return filepath.Join(lastDir, deltaPath), nil
+		}
+		// It's a full path
+		return deltaPath, nil
+	}
+
+	// Parse delta format: -N:suffix
+	colonIdx := strings.Index(deltaPath, ":")
+	if colonIdx == -1 {
+		return "", fmt.Errorf("invalid delta format: %s", deltaPath)
+	}
+
+	levelsUpStr := deltaPath[1:colonIdx] // Skip the '-'
+	suffix := deltaPath[colonIdx+1:]
+
+	levelsUp, err := strconv.Atoi(levelsUpStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid levels in delta: %s", levelsUpStr)
+	}
+
+	// Start from last path's directory
+	lastDir := filepath.Dir(lastPath)
+	parts := strings.Split(lastDir, string(filepath.Separator))
+
+	// Go up N levels
+	if levelsUp > len(parts) {
+		return "", fmt.Errorf("cannot go up %d levels from %s", levelsUp, lastDir)
+	}
+
+	// Remove the last N parts
+	parts = parts[:len(parts)-levelsUp]
+
+	// Join with the new suffix
+	if len(parts) == 0 {
+		return suffix, nil
+	}
+
+	newPath := strings.Join(parts, string(filepath.Separator))
+	if suffix != "" {
+		newPath = filepath.Join(newPath, suffix)
+	}
+
+	return newPath, nil
+}
+
+// calculateDeltaPath computes a compressed path representation relative to the last path
+// Returns the full path for the first file, or a delta like "-1:file2" for subsequent files
+func calculateDeltaPath(lastPath, currentPath string) string {
+	if lastPath == "" {
+		// First path, write it fully
+		return currentPath
+	}
+
+	// Get directory parts
+	lastDir := filepath.Dir(lastPath)
+	currentDir := filepath.Dir(currentPath)
+	currentFile := filepath.Base(currentPath)
+
+	// Split into parts
+	lastParts := strings.Split(lastDir, string(filepath.Separator))
+	currentParts := strings.Split(currentDir, string(filepath.Separator))
+
+	// Find common prefix length
+	commonLen := 0
+	minLen := len(lastParts)
+	if len(currentParts) < minLen {
+		minLen = len(currentParts)
+	}
+
+	for i := 0; i < minLen; i++ {
+		if lastParts[i] == currentParts[i] {
+			commonLen++
+		} else {
+			break
+		}
+	}
+
+	// Calculate how many directories to go up from lastDir
+	levelsUp := len(lastParts) - commonLen
+
+	// Build the new suffix (the parts after the common prefix + filename)
+	newParts := append([]string{}, currentParts[commonLen:]...)
+	newParts = append(newParts, currentFile)
+	newSuffix := strings.Join(newParts, string(filepath.Separator))
+
+	if levelsUp == 0 {
+		// Going deeper or staying at same level, just write the suffix
+		return newSuffix
+	}
+
+	// Going up directories, use -N:suffix format
+	return fmt.Sprintf("-%d:%s", levelsUp, newSuffix)
+}
+
 func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outDir, 0755); err != nil {
@@ -114,8 +217,10 @@ func (rw *RotatingWriter) rotate() error {
 	return nil
 }
 
-func (rw *RotatingWriter) Write(line string) error {
-	lineSize := int64(len(line) + 1) // +1 for newline
+func (rw *RotatingWriter) WritePath(fullPath string) error {
+	// Calculate delta path relative to last written path
+	deltaPath := calculateDeltaPath(rw.lastWrittenPath, fullPath)
+	lineSize := int64(len(deltaPath) + 1) // +1 for newline
 
 	// Check if we've hit the max size limit
 	if rw.maxSize > 0 && rw.totalBytesWritten+lineSize > rw.maxSize {
@@ -129,14 +234,15 @@ func (rw *RotatingWriter) Write(line string) error {
 		}
 	}
 
-	// Write the line
-	n, err := fmt.Fprintf(rw.currentFile, "%s\n", line)
+	// Write the delta path
+	n, err := fmt.Fprintf(rw.currentFile, "%s\n", deltaPath)
 	if err != nil {
 		return fmt.Errorf("failed to write to file: %w", err)
 	}
 
 	rw.currentSize += int64(n)
 	rw.totalBytesWritten += int64(n)
+	rw.lastWrittenPath = fullPath // Update last written path
 	return nil
 }
 
@@ -147,13 +253,80 @@ func (rw *RotatingWriter) Close() error {
 	return nil
 }
 
+// inflateFile reads a compressed log file and writes expanded paths to output
+func inflateFile(inputPath, outputPath string) error {
+	// Open input file
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	// Create output file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	scanner := bufio.NewScanner(inputFile)
+	writer := bufio.NewWriter(outputFile)
+	defer writer.Flush()
+
+	var lastPath string
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		deltaPath := scanner.Text()
+
+		// Reconstruct the full path
+		fullPath, err := reconstructPath(lastPath, deltaPath)
+		if err != nil {
+			return fmt.Errorf("error at line %d: %w", lineNum, err)
+		}
+
+		// Write the full path
+		if _, err := fmt.Fprintf(writer, "%s\n", fullPath); err != nil {
+			return fmt.Errorf("failed to write to output: %w", err)
+		}
+
+		lastPath = fullPath
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading input file: %w", err)
+	}
+
+	return nil
+}
+
 func main() {
 	// Parse command-line flags
 	dir := flag.String("dir", ".", "Directory to walk")
 	outDir := flag.String("outDir", ".", "Output directory for log files")
 	maxSizeStr := flag.String("maxSize", "", "Maximum total size to write (e.g., 1GB, 500MB, 2GB)")
+	inflateInput := flag.String("inflate", "", "Inflate mode: input compressed log file to expand")
+	inflateOutput := flag.String("output", "", "Inflate mode: output file for expanded paths")
 	flag.Parse()
 
+	// Check if we're in inflate mode
+	if *inflateInput != "" {
+		if *inflateOutput == "" {
+			fmt.Fprintf(os.Stderr, "Error: --output is required when using --inflate\n")
+			os.Exit(1)
+		}
+
+		fmt.Fprintf(os.Stderr, "Inflating %s to %s...\n", *inflateInput, *inflateOutput)
+		if err := inflateFile(*inflateInput, *inflateOutput); err != nil {
+			fmt.Fprintf(os.Stderr, "Error inflating file: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Inflation completed successfully.\n")
+		return
+	}
+
+	// Normal mode: walk directory and create compressed logs
 	// Validate directory exists
 	if _, err := os.Stat(*dir); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: directory '%s' does not exist\n", *dir)
@@ -201,7 +374,7 @@ func walkDirectory(root string, writer *RotatingWriter) error {
 			dir := filepath.Dir(path)
 
 			if dir != lastDir {
-				if err := writer.Write(path); err != nil {
+				if err := writer.WritePath(path); err != nil {
 					return fmt.Errorf("failed to write path: %w", err)
 				}
 				lastDir = dir
