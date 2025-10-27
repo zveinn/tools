@@ -1,22 +1,78 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 const maxFileSize = 200 * 1024 * 1024 // 200MB in bytes
 
+var ErrMaxSizeReached = errors.New("maximum size limit reached")
+
 type RotatingWriter struct {
-	outDir      string
-	currentFile *os.File
-	currentSize int64
-	fileNumber  int
+	outDir            string
+	currentFile       *os.File
+	currentSize       int64
+	fileNumber        int
+	totalBytesWritten int64
+	maxSize           int64
 }
 
-func NewRotatingWriter(outDir string) (*RotatingWriter, error) {
+// parseSize parses human-readable sizes like "1GB", "500MB", "2GB"
+func parseSize(sizeStr string) (int64, error) {
+	if sizeStr == "" {
+		return 0, nil // 0 means no limit
+	}
+
+	sizeStr = strings.TrimSpace(strings.ToUpper(sizeStr))
+
+	// Extract number and unit
+	var numStr string
+	var unit string
+
+	for i, c := range sizeStr {
+		if c >= '0' && c <= '9' || c == '.' {
+			numStr += string(c)
+		} else {
+			unit = sizeStr[i:]
+			break
+		}
+	}
+
+	if numStr == "" {
+		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
+	}
+
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number in size: %s", numStr)
+	}
+
+	var multiplier int64
+	switch unit {
+	case "B", "":
+		multiplier = 1
+	case "KB":
+		multiplier = 1024
+	case "MB":
+		multiplier = 1024 * 1024
+	case "GB":
+		multiplier = 1024 * 1024 * 1024
+	case "TB":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("invalid size unit: %s (supported: B, KB, MB, GB, TB)", unit)
+	}
+
+	return int64(num * float64(multiplier)), nil
+}
+
+func NewRotatingWriter(outDir string, maxSize int64) (*RotatingWriter, error) {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
@@ -25,6 +81,7 @@ func NewRotatingWriter(outDir string) (*RotatingWriter, error) {
 	rw := &RotatingWriter{
 		outDir:     outDir,
 		fileNumber: 1,
+		maxSize:    maxSize,
 	}
 
 	// Create the first file
@@ -58,8 +115,14 @@ func (rw *RotatingWriter) rotate() error {
 }
 
 func (rw *RotatingWriter) Write(line string) error {
-	// Check if we need to rotate
 	lineSize := int64(len(line) + 1) // +1 for newline
+
+	// Check if we've hit the max size limit
+	if rw.maxSize > 0 && rw.totalBytesWritten+lineSize > rw.maxSize {
+		return ErrMaxSizeReached
+	}
+
+	// Check if we need to rotate
 	if rw.currentSize+lineSize > maxFileSize {
 		if err := rw.rotate(); err != nil {
 			return err
@@ -73,6 +136,7 @@ func (rw *RotatingWriter) Write(line string) error {
 	}
 
 	rw.currentSize += int64(n)
+	rw.totalBytesWritten += int64(n)
 	return nil
 }
 
@@ -87,6 +151,7 @@ func main() {
 	// Parse command-line flags
 	dir := flag.String("dir", ".", "Directory to walk")
 	outDir := flag.String("outDir", ".", "Output directory for log files")
+	maxSizeStr := flag.String("maxSize", "", "Maximum total size to write (e.g., 1GB, 500MB, 2GB)")
 	flag.Parse()
 
 	// Validate directory exists
@@ -95,8 +160,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse max size
+	maxSize, err := parseSize(*maxSizeStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing maxSize: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create rotating writer
-	writer, err := NewRotatingWriter(*outDir)
+	writer, err := NewRotatingWriter(*outDir, maxSize)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating rotating writer: %v\n", err)
 		os.Exit(1)
@@ -105,9 +177,15 @@ func main() {
 
 	// Walk the directory
 	if err := walkDirectory(*dir, writer); err != nil {
+		if errors.Is(err, ErrMaxSizeReached) {
+			fmt.Fprintf(os.Stderr, "Maximum size limit reached. Total bytes written: %d\n", writer.totalBytesWritten)
+			os.Exit(0)
+		}
 		fmt.Fprintf(os.Stderr, "Error walking directory: %v\n", err)
 		os.Exit(1)
 	}
+
+	fmt.Fprintf(os.Stderr, "Completed. Total bytes written: %d\n", writer.totalBytesWritten)
 }
 
 func walkDirectory(root string, writer *RotatingWriter) error {
