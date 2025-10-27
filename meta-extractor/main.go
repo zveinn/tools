@@ -17,6 +17,18 @@ const maxFileSize = 200 * 1024 * 1024 // 200MB in bytes
 
 var ErrMaxFilesReached = errors.New("maximum number of files reached")
 
+type MaxFilesError struct {
+	LastDir string
+}
+
+func (e *MaxFilesError) Error() string {
+	return fmt.Sprintf("maximum number of files reached, last directory: %s", e.LastDir)
+}
+
+func (e *MaxFilesError) Is(target error) bool {
+	return target == ErrMaxFilesReached
+}
+
 type RotatingWriter struct {
 	outDir            string
 	currentFile       *os.File
@@ -221,7 +233,7 @@ func calculateDeltaPath(lastPath, currentPath string) string {
 	return fmt.Sprintf("-%d:%s", levelsUp, newSuffix)
 }
 
-func NewRotatingWriter(outDir string, maxFiles int) (*RotatingWriter, error) {
+func NewRotatingWriter(outDir string, maxFiles int, startFileNum int) (*RotatingWriter, error) {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
@@ -229,7 +241,7 @@ func NewRotatingWriter(outDir string, maxFiles int) (*RotatingWriter, error) {
 
 	rw := &RotatingWriter{
 		outDir:     outDir,
-		fileNumber: 1,
+		fileNumber: startFileNum,
 		maxFiles:   maxFiles,
 	}
 
@@ -239,6 +251,42 @@ func NewRotatingWriter(outDir string, maxFiles int) (*RotatingWriter, error) {
 	}
 
 	return rw, nil
+}
+
+// findLastFileNumber scans outDir for existing out.N.log or out.N.log.gz files
+// and returns the highest N found, or 0 if none exist
+func findLastFileNumber(outDir string) (int, error) {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		// If directory doesn't exist, start from 1
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	maxNum := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		// Match out.N.log or out.N.log.gz
+		if strings.HasPrefix(name, "out.") && (strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".log.gz")) {
+			// Extract number
+			var num int
+			if strings.HasSuffix(name, ".log.gz") {
+				_, err := fmt.Sscanf(name, "out.%d.log.gz", &num)
+				if err == nil && num > maxNum {
+					maxNum = num
+				}
+			} else if strings.HasSuffix(name, ".log") {
+				_, err := fmt.Sscanf(name, "out.%d.log", &num)
+				if err == nil && num > maxNum {
+					maxNum = num
+				}
+			}
+		}
+	}
+
+	return maxNum, nil
 }
 
 func (rw *RotatingWriter) rotate() error {
@@ -388,6 +436,7 @@ func main() {
 	dir := flag.String("dir", ".", "Directory to walk")
 	outDir := flag.String("outDir", ".", "Output directory for log files")
 	numFiles := flag.Int("numFiles", 0, "Maximum number of files to write (0 = unlimited)")
+	resume := flag.Bool("resume", false, "Resume from last directory in resume.path")
 	inflateInput := flag.String("inflate", "", "Inflate mode: input compressed log file to expand")
 	inflateOutput := flag.String("output", "", "Inflate mode: output file for expanded paths")
 	flag.Parse()
@@ -415,8 +464,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check if we're resuming
+	var resumeDir string
+	var startFileNum int = 1
+	resumePath := filepath.Join(*outDir, "resume.path")
+
+	if *resume {
+		data, err := os.ReadFile(resumePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading resume.path: %v\n", err)
+			os.Exit(1)
+		}
+		resumeDir = strings.TrimSpace(string(data))
+		fmt.Fprintf(os.Stderr, "Resuming from directory: %s\n", resumeDir)
+
+		// Find the last file number to continue from
+		lastNum, err := findLastFileNumber(*outDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error finding last file number: %v\n", err)
+			os.Exit(1)
+		}
+		startFileNum = lastNum + 1
+		fmt.Fprintf(os.Stderr, "Continuing from file number: %d\n", startFileNum)
+	}
+
 	// Create rotating writer
-	writer, err := NewRotatingWriter(*outDir, *numFiles)
+	writer, err := NewRotatingWriter(*outDir, *numFiles, startFileNum)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating rotating writer: %v\n", err)
 		os.Exit(1)
@@ -424,8 +497,18 @@ func main() {
 	defer writer.Close()
 
 	// Walk the directory
-	if err := walkDirectory(*dir, writer); err != nil {
+	if err := walkDirectory(*dir, writer, resumeDir); err != nil {
 		if errors.Is(err, ErrMaxFilesReached) {
+			// Extract the last directory from the error
+			var maxFilesErr *MaxFilesError
+			if errors.As(err, &maxFilesErr) {
+				// Write the last directory to resume.path
+				if writeErr := os.WriteFile(resumePath, []byte(maxFilesErr.LastDir), 0644); writeErr != nil {
+					fmt.Fprintf(os.Stderr, "Error writing resume.path: %v\n", writeErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "Saved resume point to: %s\n", resumePath)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "Maximum file limit reached (%d files). Total bytes written: %d\n", *numFiles, writer.totalBytesWritten)
 			os.Exit(0)
 		}
@@ -436,10 +519,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Completed. Total bytes written: %d\n", writer.totalBytesWritten)
 }
 
-func walkDirectory(root string, writer *RotatingWriter) error {
+func walkDirectory(root string, writer *RotatingWriter, resumeDir string) error {
 	var lastDir string
 
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error accessing path %s: %v\n", path, err)
 			return err
@@ -448,8 +531,17 @@ func walkDirectory(root string, writer *RotatingWriter) error {
 		if !d.IsDir() {
 			dir := filepath.Dir(path)
 
+			// Skip directories that are <= resumeDir (if resuming)
+			if resumeDir != "" && dir <= resumeDir {
+				return nil
+			}
+
 			if dir != lastDir {
 				if err := writer.WritePath(path); err != nil {
+					// If we hit max files, wrap error with last directory
+					if errors.Is(err, ErrMaxFilesReached) {
+						return &MaxFilesError{LastDir: dir}
+					}
 					return fmt.Errorf("failed to write path: %w", err)
 				}
 				lastDir = dir
@@ -458,4 +550,11 @@ func walkDirectory(root string, writer *RotatingWriter) error {
 
 		return nil
 	})
+
+	// Wrap any ErrMaxFilesReached with the last directory we processed
+	if err != nil && errors.Is(err, ErrMaxFilesReached) {
+		return &MaxFilesError{LastDir: lastDir}
+	}
+
+	return err
 }
