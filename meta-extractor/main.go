@@ -370,27 +370,50 @@ func (rw *RotatingWriter) Close() error {
 	return nil
 }
 
-// inflateFile reads a compressed log file and writes expanded paths to output
-// Automatically handles both .gz compressed and uncompressed files
-func inflateFile(inputPath, outputPath string) error {
-	// Open input file
-	inputFile, err := os.Open(inputPath)
+// inflateDirectory reads all compressed log files in a directory and writes expanded paths to output
+// Files are processed sequentially (out.1.gz, out.2.gz, etc.) maintaining lastPath state across files
+func inflateDirectory(inputDir, outputPath string) error {
+	// Read directory entries
+	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return fmt.Errorf("failed to open input file: %w", err)
+		return fmt.Errorf("failed to read input directory: %w", err)
 	}
-	defer inputFile.Close()
 
-	// Create a reader that handles both gzip and plain files
-	var reader io.Reader = inputFile
+	// Collect and sort .gz files by number
+	type numberedFile struct {
+		path string
+		num  int
+	}
+	var files []numberedFile
 
-	// Check if file is gzipped by extension
-	if strings.HasSuffix(inputPath, ".gz") {
-		gzReader, err := gzip.NewReader(inputFile)
-		if err != nil {
-			return fmt.Errorf("failed to create gzip reader: %w", err)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		defer gzReader.Close()
-		reader = gzReader
+		name := entry.Name()
+		// Match out.N.log.gz pattern
+		if strings.HasPrefix(name, "out.") && strings.HasSuffix(name, ".log.gz") {
+			var num int
+			if _, err := fmt.Sscanf(name, "out.%d.log.gz", &num); err == nil {
+				files = append(files, numberedFile{
+					path: filepath.Join(inputDir, name),
+					num:  num,
+				})
+			}
+		}
+	}
+
+	if len(files) == 0 {
+		return fmt.Errorf("no compressed log files found in %s", inputDir)
+	}
+
+	// Sort files by number
+	for i := 0; i < len(files)-1; i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[i].num > files[j].num {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
 	}
 
 	// Create output file
@@ -400,35 +423,64 @@ func inflateFile(inputPath, outputPath string) error {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(reader)
 	writer := bufio.NewWriter(outputFile)
 	defer writer.Flush()
 
 	var lastPath string
-	lineNum := 0
+	totalLines := 0
 
-	for scanner.Scan() {
-		lineNum++
-		deltaPath := scanner.Text()
+	// Process each file in order, maintaining lastPath across files
+	for _, f := range files {
+		fmt.Fprintf(os.Stderr, "Processing %s...\n", filepath.Base(f.path))
 
-		// Reconstruct the full path
-		fullPath, err := reconstructPath(lastPath, deltaPath)
+		inputFile, err := os.Open(f.path)
 		if err != nil {
-			return fmt.Errorf("error at line %d: %w", lineNum, err)
+			return fmt.Errorf("failed to open %s: %w", f.path, err)
 		}
 
-		// Write the full path
-		if _, err := fmt.Fprintf(writer, "%s\n", fullPath); err != nil {
-			return fmt.Errorf("failed to write to output: %w", err)
+		gzReader, err := gzip.NewReader(inputFile)
+		if err != nil {
+			inputFile.Close()
+			return fmt.Errorf("failed to create gzip reader for %s: %w", f.path, err)
 		}
 
-		lastPath = fullPath
+		scanner := bufio.NewScanner(gzReader)
+		lineNum := 0
+
+		for scanner.Scan() {
+			lineNum++
+			totalLines++
+			deltaPath := scanner.Text()
+
+			// Reconstruct the full path using lastPath from previous file
+			fullPath, err := reconstructPath(lastPath, deltaPath)
+			if err != nil {
+				gzReader.Close()
+				inputFile.Close()
+				return fmt.Errorf("error in %s at line %d: %w", filepath.Base(f.path), lineNum, err)
+			}
+
+			// Write the full path
+			if _, err := fmt.Fprintf(writer, "%s\n", fullPath); err != nil {
+				gzReader.Close()
+				inputFile.Close()
+				return fmt.Errorf("failed to write to output: %w", err)
+			}
+
+			lastPath = fullPath
+		}
+
+		if err := scanner.Err(); err != nil {
+			gzReader.Close()
+			inputFile.Close()
+			return fmt.Errorf("error reading %s: %w", f.path, err)
+		}
+
+		gzReader.Close()
+		inputFile.Close()
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading input file: %w", err)
-	}
-
+	fmt.Fprintf(os.Stderr, "Processed %d files, %d total lines\n", len(files), totalLines)
 	return nil
 }
 
@@ -438,7 +490,7 @@ func main() {
 	outDir := flag.String("outDir", ".", "Output directory for log files")
 	numFiles := flag.Int("numFiles", 0, "Maximum number of files to write (0 = unlimited)")
 	resume := flag.Bool("resume", false, "Resume from last directory in resume.path")
-	inflateInput := flag.String("inflate", "", "Inflate mode: input compressed log file to expand")
+	inflateInput := flag.String("inflate", "", "Inflate mode: input directory containing compressed log files")
 	inflateOutput := flag.String("output", "", "Inflate mode: output file for expanded paths")
 	flag.Parse()
 
@@ -449,9 +501,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Fprintf(os.Stderr, "Inflating %s to %s...\n", *inflateInput, *inflateOutput)
-		if err := inflateFile(*inflateInput, *inflateOutput); err != nil {
-			fmt.Fprintf(os.Stderr, "Error inflating file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Inflating directory %s to %s...\n", *inflateInput, *inflateOutput)
+		if err := inflateDirectory(*inflateInput, *inflateOutput); err != nil {
+			fmt.Fprintf(os.Stderr, "Error inflating directory: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Inflation completed successfully.\n")
