@@ -140,10 +140,11 @@ func reconstructPath(lastPath, deltaPath string) (string, error) {
 		// Check if it's a relative path from last directory
 		if lastPath != "" && !strings.HasPrefix(deltaPath, "-") {
 			lastDir := filepath.Dir(lastPath)
-			return filepath.Join(lastDir, deltaPath), nil
+			result := filepath.Join(lastDir, deltaPath)
+			return filepath.Clean(result), nil
 		}
-		// It's a full path
-		return deltaPath, nil
+		// It's a full path - clean it to handle any irregularities
+		return filepath.Clean(deltaPath), nil
 	}
 
 	// Parse delta format: -N:suffix
@@ -173,25 +174,40 @@ func reconstructPath(lastPath, deltaPath string) (string, error) {
 	parts = parts[:len(parts)-levelsUp]
 
 	// Join with the new suffix
+	var newPath string
 	if len(parts) == 0 {
-		return suffix, nil
+		// We went up past everything, suffix should be absolute
+		newPath = suffix
+	} else if len(parts) == 1 && parts[0] == "" {
+		// We're at root (Unix absolute path started with /)
+		if suffix != "" {
+			newPath = string(filepath.Separator) + suffix
+		} else {
+			newPath = string(filepath.Separator)
+		}
+	} else {
+		// Normal case: join parts back together
+		newPath = strings.Join(parts, string(filepath.Separator))
+		if suffix != "" {
+			newPath = filepath.Join(newPath, suffix)
+		}
 	}
 
-	newPath := strings.Join(parts, string(filepath.Separator))
-	if suffix != "" {
-		newPath = filepath.Join(newPath, suffix)
-	}
-
-	return newPath, nil
+	return filepath.Clean(newPath), nil
 }
 
 // calculateDeltaPath computes a compressed path representation relative to the last path
 // Returns the full path for the first file, or a delta like "-1:file2" for subsequent files
 func calculateDeltaPath(lastPath, currentPath string) string {
+	// Clean paths to handle .., ., and normalize separators
+	currentPath = filepath.Clean(currentPath)
+
 	if lastPath == "" {
 		// First path, write it fully
 		return currentPath
 	}
+
+	lastPath = filepath.Clean(lastPath)
 
 	// Get directory parts
 	lastDir := filepath.Dir(lastPath)
@@ -328,6 +344,9 @@ func (rw *RotatingWriter) rotate() error {
 }
 
 func (rw *RotatingWriter) WritePath(fullPath string) error {
+	// Clean the path to normalize it
+	fullPath = filepath.Clean(fullPath)
+
 	// Calculate delta path relative to last written path
 	deltaPath := calculateDeltaPath(rw.lastWrittenPath, fullPath)
 	lineSize := int64(len(deltaPath) + 1) // +1 for newline
@@ -347,7 +366,7 @@ func (rw *RotatingWriter) WritePath(fullPath string) error {
 
 	rw.currentSize += int64(n)
 	rw.totalBytesWritten += int64(n)
-	rw.lastWrittenPath = fullPath // Update last written path
+	rw.lastWrittenPath = fullPath // Update last written path (now cleaned)
 	return nil
 }
 
@@ -528,7 +547,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error reading resume.path: %v\n", err)
 			os.Exit(1)
 		}
-		resumePath = strings.TrimSpace(string(data))
+		resumePath = filepath.Clean(strings.TrimSpace(string(data)))
 		fmt.Fprintf(os.Stderr, "Resuming from path: %s\n", resumePath)
 
 		fmt.Fprintf(os.Stderr, "Continuing from file number: %d\n", startFileNum)
@@ -580,7 +599,16 @@ func walkDirectory(root string, writer *RotatingWriter, resumePath string) error
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return fs.SkipDir
+			// Handle errors from accessing files/directories
+			// This can happen if files are deleted during the walk
+			if d != nil && d.IsDir() {
+				// If it's a directory error, skip the entire directory
+				fmt.Fprintf(os.Stderr, "Warning: skipping directory %s: %v\n", path, err)
+				return fs.SkipDir
+			}
+			// For file errors, just skip this file and continue
+			fmt.Fprintf(os.Stderr, "Warning: skipping file %s: %v\n", path, err)
+			return nil
 		}
 
 		// Track current path for resume
