@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build linux ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          # Native runners on both architectures: libghostty-vt-sys
+          # compiles Ghostty with zig for the host, so cross-compiling
+          # is more trouble than a second runner.
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # libghostty-vt-sys builds libghostty-vt from Ghostty source at
+      # build time, and Ghostty requires this EXACT zig version (newer
+      # ones are rejected). Only bump together with the libghostty-vt
+      # crate: check what its pinned Ghostty source demands first.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          strip target/release/rmux
+          mkdir -p dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
+          cp target/release/rmux rmux.service default-config.yaml README.md \
+            dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux/
+          tar -C dist -czf dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux.tar.gz \
+            rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true

@@ -1,3 +1,22 @@
 data
 /data
 ./data
+
+# Rust build output (the nested projects lost their own .gitignore when the
+# sub-repo .git dirs were removed).
+target/
+
+# Go binaries built in-tree by the projects' own build scripts.
+/xbh/gistory
+/xmem/memory-analysis
+
+# Release packaging scratch dirs used by .github/workflows/release.yml.
+/dist/
+/artifacts/
+
+# Machine-local agent state.
+.claude/settings.local.json
+
+# Secrets: xssh reads a server key and logs from its working dir.
+*.key
+memfd-log.txt

@@ -1,0 +1,16 @@
+# Copy to ~/.secrets/sssh/config.yaml (sssh rewrites this file on `add-key`,
+# so comments are not preserved). Keep it chmod 600 — it holds the S3 secret.
+endpoint: "https://s3.example.com"   # S3 or MinIO endpoint
+bucket: "ssh-keys"                   # bucket holding the encrypted private keys
+minio_user: "myuser"                 # S3 access key
+minio_secret: "mysecret"             # S3 secret key
+# The argon2 salt is random per key and stored inside each encrypted key,
+# so there is nothing salt-related to configure here.
+
+aliases:
+  myserver:
+    target: "root@203.0.113.10"      # user@host[:port]
+    s3_key: "myserver"   # object name in the bucket (optional, defaults to the alias name)
+
+  otherserver:
+    target: "admin@otherserver.example.com"

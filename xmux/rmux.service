@@ -1,0 +1,34 @@
+# System service for the rmux terminal multiplexer server.
+#
+# Runs at boot as a system-wide service, independent of login sessions —
+# sessions survive SSH logouts with no `loginctl enable-linger` needed.
+#
+# Edit User= for your username (and ExecStart= if rmux lives somewhere
+# other than /usr/local/bin), then:
+#   sudo cp rmux.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rmux
+#
+# Logs: journalctl -u rmux
+
+[Unit]
+Description=rmux terminal multiplexer server (libghostty-vt)
+After=local-fs.target
+
+[Service]
+# The server (and every shell it spawns) runs as this user, never root.
+User=[YOUR_USER]
+ExecStart=/usr/local/bin/rmux server --config [PATH_TO_CONFIG_DIR (optional)]
+Restart=on-failure
+
+# Signal only the server, not the panes. The server saves the layout and
+# hangs up its ptys on SIGTERM, so the shells exit on their own SIGHUP.
+# Under the default KillMode=control-group systemd would instead SIGTERM
+# every process inside every pane — killing whatever is running in them,
+# and pointlessly, since interactive bash ignores SIGTERM: the stop then
+# blocks for the full timeout and ends in SIGKILL.
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,22 @@
+[package]
+name = "sssh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+minio = "0.4"
+bytes = "1"
+futures-util = "0.3"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+rpassword = "7"
+# ed25519 for gen-key; rsa so pub-key can parse RSA keys added via add-key
+# (ecdsa is a default feature)
+ssh-key = { version = "0.6", features = ["ed25519", "rsa"] }
+dirs = "5"
+libc = "0.2"
+which = "6"
+zeroize = "1"

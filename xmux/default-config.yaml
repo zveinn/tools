@@ -1,0 +1,42 @@
+accent: "#7aa2f7"
+
+shell: /usr/bin/bash
+
+# where new shells start; unset or empty = your home directory
+start_dir:
+
+# lines of scrollback kept per pane (scroll with the mouse wheel or
+# PageUp/PageDown; applies to new shells)
+scrollback_lines: 5000
+
+# mouse select-to-copy: drag to select text in a pane (double-click =
+# word, released selection lands on your clipboard via OSC 52 — works
+# over SSH when your terminal supports it)
+select_copy: true
+
+# tab bar position: bottom (default) or top
+bar_position: bottom
+
+terminal_envs:
+  TERM: xterm-256color
+
+# chords that type a program + Enter into the focused pane, e.g.
+#   alt+g: lazygit
+commands:
+
+keybindings:
+  session-manager: ctrl+o
+  tab-manager: ctrl+n
+  split-horizontal: ctrl+w
+  split-vertical: ctrl+q
+  focus-next: ctrl+t
+  focus-left: ctrl+h
+  focus-right: ctrl+l
+  focus-up: ctrl+k
+  focus-down: ctrl+j
+  detach: ctrl+g
+  fullscreen: ctrl+f
+  terminal-settings: ctrl+s
+
+sessions:
+  1: { name: meow, key: F7 }

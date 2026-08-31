@@ -1,0 +1,34 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          tar -C target/release -czf sssh-${{ github.ref_name }}-x86_64-linux.tar.gz sssh
+          sha256sum sssh-${{ github.ref_name }}-x86_64-linux.tar.gz > sssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sssh-${{ github.ref_name }}-x86_64-linux.tar.gz
+            sssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
+          generate_release_notes: true

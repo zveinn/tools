@@ -1,0 +1,7 @@
+/target
+
+# Local secrets and scratch files — never commit these
+/config.yaml
+/server.key
+*.key
+memfd-log.txt
