@@ -7,8 +7,8 @@
 //! name over a Unix socket, so sessions survive SSH disconnects. At most
 //! one client per session — a new attach kicks the old client.
 //!
-//!   rmux server        run the server (foreground)
-//!   rmux a <name>      attach to session <name>, creating it if new
+//!   xmux server        run the server (foreground)
+//!   xmux a <name>      attach to session <name>, creating it if new
 //!
 //! Inside a client (defaults; rebindable in the config): Ctrl+O opens
 //! the session manager, Ctrl+N the tab manager, Ctrl+K/L split the
@@ -40,7 +40,7 @@ fn main() {
             args.remove(i);
         } else if args[i] == "--config" {
             if i + 1 >= args.len() {
-                eprintln!("rmux: --config needs a directory");
+                eprintln!("xmux: --config needs a directory");
                 std::process::exit(2);
             }
             config::set_dir(args.remove(i + 1).into());
@@ -54,14 +54,14 @@ fn main() {
         Some("server") => server::run(),
         Some("a" | "attach") => match args.get(1) {
             Some(name) => client::run(name),
-            None => Err("usage: rmux a[ttach] <session-name>".into()),
+            None => Err("usage: xmux a[ttach] <session-name>".into()),
         },
         Some("list" | "ls") => client::list(),
         Some("agent") => agent::run(&args[1..]),
         _ => {
             eprintln!(
-                "usage: rmux [--config <dir>] server | rmux a[ttach] <session-name> | rmux list\n\
-                        rmux agent new|kill|send|read ...  (rmux agent for details)"
+                "usage: xmux [--config <dir>] server | xmux a[ttach] <session-name> | xmux list\n\
+                        xmux agent new|kill|send|read ...  (xmux agent for details)"
             );
             std::process::exit(2);
         }
@@ -69,7 +69,7 @@ fn main() {
     // One clean line on stderr (journalctl shows it) instead of Rust's
     // escaped Debug formatting.
     if let Err(e) = result {
-        eprintln!("rmux: {e}");
+        eprintln!("xmux: {e}");
         std::process::exit(1);
     }
 }

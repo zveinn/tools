@@ -1,4 +1,4 @@
-# rmux
+# xmux
 
 A minimal terminal multiplexer built on [`libghostty-vt`](https://crates.io/crates/libghostty-vt),
 the terminal emulation engine extracted from [Ghostty](https://ghostty.org).
@@ -12,32 +12,32 @@ LLM agents get a first-class, non-interactive control surface — one-shot
 commands over the socket, no pty, no keystroke faking:
 
 ```sh
-rmux agent new    build              # create an agent session (or: new build <tab>)
-rmux agent send   build 'cargo test' # type text + Enter into it ([-t tab])
-rmux agent read   build              # the rendered screen, as plain text ([-t tab])
-rmux agent rename build tests        # short, descriptive names
-rmux agent kill   build              # kill a session (or: kill build <tab>)
+xmux agent new    build              # create an agent session (or: new build <tab>)
+xmux agent send   build 'cargo test' # type text + Enter into it ([-t tab])
+xmux agent read   build              # the rendered screen, as plain text ([-t tab])
+xmux agent rename build tests        # short, descriptive names
+xmux agent kill   build              # kill a session (or: kill build <tab>)
 ```
 
 Agent sessions are sandboxed by design: the agent commands **refuse to
 touch your sessions**. They live in their own list, sorted by activity
 and tagged with a last-activity age — press **`a`** in the session
-manager to check on your agents, or attach with `rmux a <name>`; they
+manager to check on your agents, or attach with `xmux a <name>`; they
 are normal sessions underneath. A ready-made Claude Code skill ships in
-[`.claude/skills/rmux/`](.claude/skills/rmux/SKILL.md).
+[`.claude/skills/xmux/`](.claude/skills/xmux/SKILL.md).
 
-![rmux timelapse: splits, focus, fullscreen, tabs, managers, and an agent session](assets/demo.svg)
+![xmux timelapse: splits, focus, fullscreen, tabs, managers, and an agent session](assets/demo.svg)
 
 ## Install
 
 Grab the latest Linux build for your architecture (`x86_64` or
 `aarch64`) from the
-[releases page](https://github.com/zveinn/rmux/releases) and put `rmux`
+[releases page](https://github.com/zveinn/xmux/releases) and put `xmux`
 on your PATH:
 
 ```sh
-tar xzf rmux-v*-$(uname -m)-linux.tar.gz && cd rmux-v*-$(uname -m)-linux
-sudo install -m755 rmux /usr/local/bin/
+tar xzf xmux-v*-$(uname -m)-linux.tar.gz && cd xmux-v*-$(uname -m)-linux
+sudo install -m755 xmux /usr/local/bin/
 ```
 
 Then run the server as a systemd system service — it starts at boot and
@@ -45,9 +45,9 @@ survives SSH logouts, no linger tricks needed. The unit file ships in
 the tarball (and in this repo); set `User=` to your username first:
 
 ```sh
-sudo cp rmux.service /etc/systemd/system/
+sudo cp xmux.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now rmux
+sudo systemctl enable --now xmux
 ```
 
 To build from source instead: `cargo install --path .` — needs Rust
@@ -55,19 +55,19 @@ To build from source instead: `cargo install --path .` — needs Rust
 (`libghostty-vt` compiles from Ghostty source).
 
 ```sh
-rmux a work    # attach to session "work", creating it if new
-rmux list      # sessions: tabs, panes, attach state, agent ages
+xmux a work    # attach to session "work", creating it if new
+xmux list      # sessions: tabs, panes, attach state, agent ages
 ```
 
 Detach with **Ctrl+G** (or drop the SSH connection — the session keeps
-running). The socket lives beside the config, at `~/.config/rmux/rmux.sock`
-(`RMUX_SOCK` overrides); server logs land in `journalctl -u rmux`. Run the server
+running). The socket lives beside the config, at `~/.config/xmux/xmux.sock`
+(`XMUX_SOCK` overrides); server logs land in `journalctl -u xmux`. Run the server
 with `--config <dir>` to keep `config.yaml` and `layout.json` in a
-custom directory instead of `~/.config/rmux/`.
+custom directory instead of `~/.config/xmux/`.
 
 ## Config
 
-`~/.config/rmux/config.yaml` — created from the built-in defaults on
+`~/.config/xmux/config.yaml` — created from the built-in defaults on
 first run, and **hot-reloaded** within about a second of saving (a
 broken config is rejected and the old one stays active). Shown here
 with sample `start_dir` and `commands` values:
@@ -119,13 +119,13 @@ sessions:
 
 Keys are `[ctrl+][alt+]<char>` or `F1`–`F12`; every binding below is
 from this default config and can be remapped. Bound chords are
-swallowed by rmux and never reach the inner shell.
+swallowed by xmux and never reach the inner shell.
 
 ## Capabilities
 
 | Capability | Keys / command | Notes |
 |---|---|---|
-| Sessions | `rmux a <name>` | Created on first attach; survive disconnects; one client per session (a new attach kicks the old) |
+| Sessions | `xmux a <name>` | Created on first attach; survive disconnects; one client per session (a new attach kicks the old) |
 | Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | Always 50/50; the new shell opens in the directory of the pane it was split from; a pane's sibling takes its space when the shell exits |
 | Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip. The focused pane's frame is accent-colored with centered `▸◂▴▾` arrows pointing into it |
 | Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
@@ -148,15 +148,15 @@ swallowed by rmux and never reach the inner shell.
 | Rebindable keys | `keybindings:` in the config | Every control chord above can be remapped (`[ctrl+][alt+]<char>` or `F1`–`F12`); bound chords never reach the inner shell |
 | Tab bar position | `bar_position:` in the config | `bottom` (default) or `top`; applies live on config reload |
 | Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, keys, pins, `select_copy`, and `bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
-| Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
-| State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/rmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
+| Detach | `ctrl+g` | The session keeps running; reattach with `xmux a` |
+| State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/xmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
 | Auto-run on restore | `ctrl+s` on a pane | Declare a command for the focused pane; it is typed into the restored shell after a server restart. Enter saves, empty clears, esc cancels |
-| Agent mode | `rmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
-| Listing | `rmux list` | Colored on a tty, plain when piped (agents parse this) |
+| Agent mode | `xmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
+| Listing | `xmux list` | Colored on a tty, plain when piped (agents parse this) |
 
 ---
 
-rmux does no terminal emulation of its own — that is all
+xmux does no terminal emulation of its own — that is all
 [`libghostty-vt`](https://crates.io/crates/libghostty-vt), the VT
 engine from [Ghostty](https://ghostty.org). Credit for every correctly
 parsed escape sequence goes there.

@@ -202,7 +202,7 @@ pub fn run() -> Result<()> {
     resort_sessions(&mut sessions, &config);
     let mut clients: Vec<ClientConn> = Vec::new();
 
-    eprintln!("rmux server listening on {}", socket_path().display());
+    eprintln!("xmux server listening on {}", socket_path().display());
 
     let mut last_mtime = config_mtime();
     let mut last_save = std::time::Instant::now();
@@ -672,7 +672,7 @@ pub fn run() -> Result<()> {
     // ignores SIGTERM, so the service stop blocked for the full
     // TimeoutStopSec every restart.
     drop(sessions);
-    eprintln!("rmux server stopped ({saved} sessions saved)");
+    eprintln!("xmux server stopped ({saved} sessions saved)");
     Ok(())
 }
 

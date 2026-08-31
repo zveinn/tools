@@ -208,7 +208,7 @@ fn load_dotenv(path: &Path) -> Result<DotEnv> {
 }
 
 fn default_config_toml() -> &'static str {
-    r#"# gitsync configuration
+    r#"# xgit configuration
 # Token is optional here — GITHUB_TOKEN / GH_TOKEN / ~/.gitsync/token /
 # ~/.github-feed/.env are also checked.
 

@@ -1,4 +1,4 @@
-//! Config, loaded from `$HOME/.config/rmux/config.yaml`:
+//! Config, loaded from `$HOME/.config/xmux/config.yaml`:
 //!
 //! ```yaml
 //! start_dir: /home/you/code
@@ -343,16 +343,16 @@ pub fn set_dir(dir: std::path::PathBuf) {
 }
 
 /// Where the config lives: `<--config dir>/config.yaml` when the flag
-/// was given, else `~/.config/rmux/config.yaml`.
+/// was given, else `~/.config/xmux/config.yaml`.
 pub fn path() -> Option<std::path::PathBuf> {
     if let Some(dir) = CONFIG_DIR.get() {
         return Some(dir.join("config.yaml"));
     }
     let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join(".config/rmux/config.yaml"))
+    Some(std::path::PathBuf::from(home).join(".config/xmux/config.yaml"))
 }
 
-/// Written to `~/.config/rmux/config.yaml` when no config exists, so
+/// Written to `~/.config/xmux/config.yaml` when no config exists, so
 /// there is always a file to edit.
 const DEFAULT_CONFIG: &str = include_str!("../default-config.yaml");
 

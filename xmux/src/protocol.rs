@@ -42,13 +42,13 @@ pub const S2C_AGENT_ERR: u8 = 5;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 /// Where the server listens, for both sides of the connection.
-/// Overridable via `RMUX_SOCK`.
+/// Overridable via `XMUX_SOCK`.
 ///
 /// Deliberately not under `$XDG_RUNTIME_DIR`: that dir is torn down on
 /// logout and unset for system services, so server (systemd) and client
 /// (login session) would disagree.
 pub fn socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("RMUX_SOCK") {
+    if let Some(path) = std::env::var_os("XMUX_SOCK") {
         return PathBuf::from(path);
     }
     // Beside config.yaml and layout.json (and so it follows --config):
@@ -57,10 +57,10 @@ pub fn socket_path() -> PathBuf {
     // nobody has stat'ed is exactly that — a long-lived server would
     // eventually lose the path clients reach it by.
     if let Some(dir) = crate::config::path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-        return dir.join("rmux.sock");
+        return dir.join("xmux.sock");
     }
     // No home to speak of: fall back to the old location.
-    PathBuf::from(format!("/tmp/rmux-{}.sock", nix::unistd::getuid()))
+    PathBuf::from(format!("/tmp/xmux-{}.sock", nix::unistd::getuid()))
 }
 
 /// Connect to the server, or explain the failure in terms the user can
@@ -72,9 +72,9 @@ pub fn connect() -> crate::Result<UnixStream> {
     UnixStream::connect(&path).map_err(|e| {
         let hint = if e.kind() == std::io::ErrorKind::ConnectionRefused && path.exists() {
             "the socket is there but nothing is serving it — the server is \
-             restarting or died; retry shortly (systemctl status rmux)"
+             restarting or died; retry shortly (systemctl status xmux)"
         } else {
-            "start it with: rmux server  (or: sudo systemctl start rmux)"
+            "start it with: xmux server  (or: sudo systemctl start xmux)"
         };
         format!("cannot connect to server at {}: {e}\n{hint}", path.display()).into()
     })

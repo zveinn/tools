@@ -1,4 +1,4 @@
-// Command memory-analysis diagnoses kernel-memory pressure of the kind that
+// Command xmem diagnoses kernel-memory pressure of the kind that
 // OOM-kills processes while plenty of RAM is "free": unbounded slab growth
 // (e.g. filesystem inode caches), SLUB merged-cache misattribution, physical
 // memory fragmentation, and the gap between kernel-owned memory and what the

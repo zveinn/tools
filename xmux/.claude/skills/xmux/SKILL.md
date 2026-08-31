@@ -1,26 +1,26 @@
 ---
-name: rmux
-description: Drive the rmux terminal multiplexer as an agent using the "rmux agent" commands — create/kill agent sessions and tabs, run commands in them, and read their screens. Use whenever asked to manage rmux sessions or to run/observe work inside rmux.
+name: xmux
+description: Drive the xmux terminal multiplexer as an agent using the "xmux agent" commands — create/kill agent sessions and tabs, run commands in them, and read their screens. Use whenever asked to manage xmux sessions or to run/observe work inside xmux.
 ---
 
-# Driving rmux as an agent
+# Driving xmux as an agent
 
-rmux is a client/server terminal multiplexer: a long-lived server owns
-**sessions → tabs → panes** (each pane is one shell). The `rmux agent`
+xmux is a client/server terminal multiplexer: a long-lived server owns
+**sessions → tabs → panes** (each pane is one shell). The `xmux agent`
 subcommands are a non-interactive control surface made for you: each is
 a one-shot command over the server's socket — no pty, no attach, no
 keystroke faking.
 
 **Agent commands only touch *agent sessions*** (ones created with
-`rmux agent new`). They refuse to kill, type into, or read the user's
+`xmux agent new`). They refuse to kill, type into, or read the user's
 own sessions — so you can use them freely without risk. Agent sessions
 appear under a separate list in the user's session manager (they press
-`a` to see them) and are tagged `agent` in `rmux list`.
+`a` to see them) and are tagged `agent` in `xmux list`.
 
 ## Discover
 
 ```sh
-rmux list
+xmux list
 ```
 
 ```
@@ -30,19 +30,19 @@ rmux list
                                         recently active agent lists first)
 ```
 
-If it errors with "cannot connect to server": `sudo systemctl start rmux`
-(or background `rmux server`).
+If it errors with "cannot connect to server": `sudo systemctl start xmux`
+(or background `xmux server`).
 
 ## The commands
 
 ```sh
-rmux agent new  <session>            # create an agent session (one shell)
-rmux agent new  <session> <tab>      # add a tab to it (becomes active)
-rmux agent kill <session>            # kill the whole session
-rmux agent kill <session> <tab>      # kill one tab (last tab = session dies)
-rmux agent send <session> [-t tab] <text...>   # type text + Enter into a pane
-rmux agent read <session> [-t tab]             # print the pane grid as text
-rmux agent rename <session> <new-name>         # rename an agent session
+xmux agent new  <session>            # create an agent session (one shell)
+xmux agent new  <session> <tab>      # add a tab to it (becomes active)
+xmux agent kill <session>            # kill the whole session
+xmux agent kill <session> <tab>      # kill one tab (last tab = session dies)
+xmux agent send <session> [-t tab] <text...>   # type text + Enter into a pane
+xmux agent read <session> [-t tab]             # print the pane grid as text
+xmux agent rename <session> <new-name>         # rename an agent session
 ```
 
 `send`/`read` target the focused pane of the session's active tab;
@@ -51,15 +51,15 @@ confirmation or a clear error and exit nonzero on failure.
 
 `new`/`send`/`read` bump the session's activity timestamp, and agent
 sessions are always listed most-recently-active first — so the top
-agent session in `rmux list` is the one most recently worked in.
+agent session in `xmux list` is the one most recently worked in.
 
 ## Run a command and read its output
 
 ```sh
-rmux agent new build
-rmux agent send build 'cargo test 2>&1 | tail -20'
+xmux agent new build
+xmux agent send build 'cargo test 2>&1 | tail -20'
 sleep 5                       # the shell runs it; wait for it to finish
-rmux agent read build
+xmux agent read build
 ```
 
 `read` returns the rendered screen — shell prompt, the command you
@@ -71,31 +71,31 @@ fresh prompt line at the bottom means the command finished.
 
 Each pane is a real persistent shell: `cd`, env vars, and background
 jobs survive between `send` calls, and the session outlives you — the
-user can attach to it later with `rmux a <session>` (agent sessions
+user can attach to it later with `xmux a <session>` (agent sessions
 behave like normal ones).
 
 ## Organize work with tabs
 
 ```sh
-rmux agent new build server     # second tab "server" in build
-rmux agent send build -t server './run-dev-server.sh'
-rmux agent read build -t server
-rmux agent kill build server    # done with that tab
+xmux agent new build server     # second tab "server" in build
+xmux agent send build -t server './run-dev-server.sh'
+xmux agent read build -t server
+xmux agent kill build server    # done with that tab
 ```
 
 ## Etiquette
 
 - Name sessions after the work — **short and descriptive** (`build`,
   `tests`, `repro-1234`) so the user knows what they'll find in them.
-  Rename when the purpose shifts (`rmux agent rename scratch bisect`);
+  Rename when the purpose shifts (`xmux agent rename scratch bisect`);
   names must be unique and can't shadow a config-pinned session.
 - Kill your sessions when the work is done — unless the point was to
   leave something running for the user (say so in your summary, and
-  tell them: attach with `rmux a <session>`, list with `a` in the
+  tell them: attach with `xmux a <session>`, list with `a` in the
   Ctrl+O session manager).
 - A session dies on its own when all its shells exit (e.g. the shell
-  crashes or you `send` an `exit`) — check `rmux list` if a session
+  crashes or you `send` an `exit`) — check `xmux list` if a session
   seems to be missing.
-- Don't try to interactively attach (`rmux a`) yourself: it's a
+- Don't try to interactively attach (`xmux a`) yourself: it's a
   full-screen TUI that needs a real terminal; `send`/`read` are your
   hands and eyes.

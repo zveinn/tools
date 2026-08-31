@@ -1129,7 +1129,7 @@ pub enum NamingOutcome {
     Cancel,
 }
 
-/// A single-line text field with a cursor. Every prompt in rmux — the
+/// A single-line text field with a cursor. Every prompt in xmux — the
 /// name prompts, the pane settings, the manager search — edits through
 /// this, so they all support the same keys.
 #[derive(Default)]
@@ -1355,7 +1355,7 @@ pub fn handle_input(
                     _ => 4, // wheel
                 };
 
-                // The tab bar is rmux's own row: clicking a tab label
+                // The tab bar is xmux's own row: clicking a tab label
                 // opens that tab, and nothing there belongs to a pane.
                 let bar_row = if config.bar_top { 1 } else { size.1 + 1 };
                 if y == bar_row {

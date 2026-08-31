@@ -1,19 +1,19 @@
 #!/bin/bash
 
-# Build script for smallest possible gistory binary
+# Build script for smallest possible xbh binary
 
 set -e
 
-echo "Building gistory with size optimizations..."
+echo "Building xbh with size optimizations..."
 
 # Build with optimizations
 CGO_ENABLED=0 go build \
     -ldflags="-s -w" \
     -trimpath \
-    -o gistory
+    -o xbh
 
 echo "✓ Built successfully"
-ls -lh gistory | awk '{print "Binary size:", $5}'
+ls -lh xbh | awk '{print "Binary size:", $5}'
 
 # Check if upx is available for additional compression
 if command -v upx &> /dev/null; then
@@ -22,9 +22,9 @@ if command -v upx &> /dev/null; then
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Compressing with UPX..."
-        upx --best --lzma gistory
+        upx --best --lzma xbh
         echo "✓ Compressed successfully"
-        ls -lh gistory | awk '{print "Final size:", $5}'
+        ls -lh xbh | awk '{print "Final size:", $5}'
     fi
 else
     echo ""
@@ -35,4 +35,4 @@ else
 fi
 
 echo ""
-echo "Build complete! Binary: ./gistory"
+echo "Build complete! Binary: ./xbh"

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use gitsync::config::Config;
+use xgit::config::Config;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "gitsync",
+    name = "xgit",
     about = "Local-first GitHub issues and pull requests TUI",
     version
 )]
@@ -37,7 +37,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(cli.offline)?;
-    gitsync::init_logging(&cfg, cli.verbose)?;
+    xgit::init_logging(&cfg, cli.verbose)?;
 
     match cli.command {
         None => {
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             let _guard = rt.enter();
-            gitsync::run_tui(cfg)
+            xgit::run_tui(cfg)
         }
         Some(Command::Sync { full }) => {
             if !cfg.has_token() {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
                 );
             }
             let rt = tokio::runtime::Runtime::new()?;
-            let report = rt.block_on(gitsync::sync_once(&cfg, full))?;
+            let report = rt.block_on(xgit::sync_once(&cfg, full))?;
             println!("{}", report.message);
             println!(
                 "fetched {}  upserted {}  unread {}",
@@ -62,6 +62,6 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Some(Command::Stats) => gitsync::print_stats(&cfg),
+        Some(Command::Stats) => xgit::print_stats(&cfg),
     }
 }

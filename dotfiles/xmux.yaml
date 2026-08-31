@@ -9,8 +9,6 @@ terminal_envs:
   TERM: xterm-256color
 
 commands:
-  ctrl+l: lazygit
-  ctrl+h: htop
 
 keybindings:
   session-manager: alt+o

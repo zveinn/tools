@@ -230,7 +230,7 @@ pub fn run(name: &str) -> Result<()> {
     let _ = stdout.write_all(&leftover);
     let _ = stdout.flush();
     drop(guard);
-    println!("[rmux] {reason}");
+    println!("[xmux] {reason}");
     Ok(())
 }
 

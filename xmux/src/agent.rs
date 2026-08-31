@@ -1,5 +1,5 @@
 //! Agent mode: a non-interactive control surface for LLM agents (and
-//! scripts). `rmux agent new/kill/send/read` are one-shot commands that
+//! scripts). `xmux agent new/kill/send/read` are one-shot commands that
 //! speak the normal socket protocol — no pty or attach needed.
 //!
 //! Sessions created here are marked as *agent sessions*: they behave
@@ -40,17 +40,17 @@ use crate::protocol::{
 /// (matches a common terminal, minus the tab bar row).
 const DEFAULT_SIZE: (u16, u16) = (120, 31);
 
-const USAGE: &str = "usage: rmux agent new <session> [tab]\n\
-       rmux agent kill <session> [tab]\n\
-       rmux agent send <session> [-t tab] <text...>\n\
-       rmux agent read <session> [-t tab]\n\
-       rmux agent rename <session> <new-name>";
+const USAGE: &str = "usage: xmux agent new <session> [tab]\n\
+       xmux agent kill <session> [tab]\n\
+       xmux agent send <session> [-t tab] <text...>\n\
+       xmux agent read <session> [-t tab]\n\
+       xmux agent rename <session> <new-name>";
 
 // ---------------------------------------------------------------------
 // Client side: parse argv, send one frame, print the reply.
 // ---------------------------------------------------------------------
 
-/// Run `rmux agent <cmd> ...`: send the command, print the server's
+/// Run `xmux agent <cmd> ...`: send the command, print the server's
 /// reply, error out (nonzero exit) when the server reports a failure.
 pub fn run(args: &[String]) -> Result<()> {
     let (kind, payload) = parse_args(args)?;
@@ -78,7 +78,7 @@ pub fn run(args: &[String]) -> Result<()> {
                     return Ok(());
                 }
                 S2C_AGENT_ERR => {
-                    eprintln!("rmux agent: {text}");
+                    eprintln!("xmux agent: {text}");
                     std::process::exit(1);
                 }
                 _ => {}
@@ -222,7 +222,7 @@ fn agent_session<'s>(
         Some(s) if s.agent => Ok(s),
         Some(_) => Err(format!(
             "\"{name}\" is not an agent session (agent commands only touch \
-             sessions created with: rmux agent new)"
+             sessions created with: xmux agent new)"
         )),
         None => Err(format!("no session named \"{name}\"")),
     }

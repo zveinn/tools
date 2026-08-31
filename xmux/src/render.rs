@@ -620,7 +620,7 @@ struct Pen {
 /// Map a cell's color to what we emit: palette indices and unset
 /// (default) colors pass through untouched, so the *host* terminal's
 /// theme decides what they look like — only genuine truecolor cells
-/// are sent as RGB. This is why rmux panes match the colors of the
+/// are sent as RGB. This is why xmux panes match the colors of the
 /// terminal they run in.
 fn style_color(c: StyleColor, default: Color) -> Color {
     match c {

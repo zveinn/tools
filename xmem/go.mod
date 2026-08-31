@@ -1,3 +1,3 @@
-module memory-analysis
+module xmem
 
 go 1.25

@@ -1,4 +1,4 @@
-# Copy to ~/.secrets/sssh/config.yaml (sssh rewrites this file on `add-key`,
+# Copy to ~/.secrets/sssh/config.yaml (xssh rewrites this file on `add-key`,
 # so comments are not preserved). Keep it chmod 600 — it holds the S3 secret.
 endpoint: "https://s3.example.com"   # S3 or MinIO endpoint
 bucket: "ssh-keys"                   # bucket holding the encrypted private keys

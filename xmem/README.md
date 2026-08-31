@@ -1,4 +1,4 @@
-# memory-analysis
+# xmem
 
 <img width="1249" height="683" alt="image" src="https://github.com/user-attachments/assets/da97331c-ecb6-4855-9dde-f8009ce7e7ff" />
 
@@ -11,11 +11,11 @@ though the kernel itself owns the memory.
 ## Build & run
 
 ```bash
-go build -o memory-analysis .
-sudo ./memory-analysis                 # full analysis, 10s sample window
-sudo ./memory-analysis -sample 30s     # longer growth/trace window
-sudo ./memory-analysis -no-trace       # strictly read-only, never touches tracefs
-./memory-analysis                      # non-root: partial (no slabinfo/tracing)
+go build -o xmem .
+sudo ./xmem                 # full analysis, 10s sample window
+sudo ./xmem -sample 30s     # longer growth/trace window
+sudo ./xmem -no-trace       # strictly read-only, never touches tracefs
+./xmem                      # non-root: partial (no slabinfo/tracing)
 ```
 
 Flags: `-sample` (default `10s`, `0` disables the window), `-no-trace`,
@@ -24,8 +24,8 @@ Flags: `-sample` (default `10s`, `0` disables the window), `-no-trace`,
 ## Live trace mode
 
 ```bash
-sudo ./memory-analysis live                # 5s refresh
-sudo ./memory-analysis live -interval 2s
+sudo ./xmem live                # 5s refresh
+sudo ./xmem live -interval 2s
 ```
 
 A 2x2 full-screen grid (Ctrl-C quits; tracefs and the terminal are

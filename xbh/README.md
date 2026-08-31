@@ -1,4 +1,4 @@
-# Gistory - Interactive Bash History Search
+# xbh - Interactive Bash History Search
 A fast, interactive replacement for bash's Ctrl+R reverse history search, built with Go and tview.
 
 <img width="1330" height="424" alt="image" src="https://github.com/user-attachments/assets/e202abae-95bc-4fbc-b84d-d55b65066d74" />
@@ -14,28 +14,28 @@ A fast, interactive replacement for bash's Ctrl+R reverse history search, built 
 
 ### Download pre-built binary
 
-1. Go to the [releases page](https://github.com/zveinn/gistory/releases/latest)
+1. Go to the [releases page](https://github.com/zveinn/xbh/releases/latest)
 2. Download the archive for your OS and architecture
 3. Extract and install:
 
 ```bash
-tar xzf gistory_*.tar.gz
-sudo mv gistory /usr/local/bin/
+tar xzf xbh_*.tar.gz
+sudo mv xbh /usr/local/bin/
 ```
 
 ### Build from source
 
 ```bash
-go build -o gistory
-sudo mv gistory /usr/local/bin/
+go build -o xbh
+sudo mv xbh /usr/local/bin/
 ```
 
 Or install to your local bin:
 
 ```bash
-go build -o gistory
+go build -o xbh
 mkdir -p ~/bin
-mv gistory ~/bin/
+mv xbh ~/bin/
 # Make sure ~/bin is in your PATH
 ```
 
@@ -44,13 +44,13 @@ mv gistory ~/bin/
 Simply run:
 
 ```bash
-gistory
+xbh
 ```
 
 To start directly in the bookmarks list:
 
 ```bash
-gistory --bookmarks
+xbh --bookmarks
 ```
 
 ### Keyboard shortcuts
@@ -62,41 +62,41 @@ gistory --bookmarks
 
 ## Bash Integration
 
-To replace Ctrl+R with gistory, add this to your `~/.bashrc`:
+To replace Ctrl+R with xbh, add this to your `~/.bashrc`:
 
 ### Option 1: Execute immediately (recommended)
 
 ```bash
-# Bind Ctrl+R to gistory - auto-execute selected command
-__gistory() {
+# Bind Ctrl+R to xbh - auto-execute selected command
+__xbh() {
     history -w
     local selected
-    selected=$(gistory)
+    selected=$(xbh)
     if [ -n "$selected" ]; then
         history -s "$selected"  # Add to history
         eval "$selected"         # Execute immediately
     fi
 }
 
-[[ $- == *i* ]] && bind -x '"\C-r": __gistory'
+[[ $- == *i* ]] && bind -x '"\C-r": __xbh'
 ```
 
 ### Option 2: Insert into command line (edit before running)
 
 ```bash
-# Bind Ctrl+R to gistory - insert into readline buffer
+# Bind Ctrl+R to xbh - insert into readline buffer
 
-__gistory() {
+__xbh() {
     history -w
     local selected
-    selected=$(gistory)
+    selected=$(xbh)
     if [ -n "$selected" ]; then
         READLINE_LINE="$selected"
         READLINE_POINT=${#READLINE_LINE}
     fi
 }
 
-[[ $- == *i* ]] && bind -x '"\C-r": __gistory'
+[[ $- == *i* ]] && bind -x '"\C-r": __xbh'
 ```
 
 After adding this, reload your bashrc:
@@ -105,44 +105,44 @@ After adding this, reload your bashrc:
 source ~/.bashrc
 ```
 
-Now pressing Ctrl+R will launch gistory instead of the default reverse search!
+Now pressing Ctrl+R will launch xbh instead of the default reverse search!
 
 ### Accessing bookmarks directly with Ctrl+B
 
-To launch gistory straight into the bookmarks list (using the `--bookmarks` flag), bind it to Ctrl+B. You can keep your Ctrl+R binding for normal history search at the same time.
+To launch xbh straight into the bookmarks list (using the `--bookmarks` flag), bind it to Ctrl+B. You can keep your Ctrl+R binding for normal history search at the same time.
 
 #### Option 1: Execute immediately (recommended)
 
 ```bash
-# Bind Ctrl+B to gistory --bookmarks - auto-execute selected bookmark
-__gistory_bookmarks() {
+# Bind Ctrl+B to xbh --bookmarks - auto-execute selected bookmark
+__xbh_bookmarks() {
     history -w
     local selected
-    selected=$(gistory --bookmarks)
+    selected=$(xbh --bookmarks)
     if [ -n "$selected" ]; then
         history -s "$selected"  # Add to history
         eval "$selected"         # Execute immediately
     fi
 }
 
-[[ $- == *i* ]] && bind -x '"\C-b": __gistory_bookmarks'
+[[ $- == *i* ]] && bind -x '"\C-b": __xbh_bookmarks'
 ```
 
 #### Option 2: Insert into command line (edit before running)
 
 ```bash
-# Bind Ctrl+B to gistory --bookmarks - insert into readline buffer
-__gistory_bookmarks() {
+# Bind Ctrl+B to xbh --bookmarks - insert into readline buffer
+__xbh_bookmarks() {
     history -w
     local selected
-    selected=$(gistory --bookmarks)
+    selected=$(xbh --bookmarks)
     if [ -n "$selected" ]; then
         READLINE_LINE="$selected"
         READLINE_POINT=${#READLINE_LINE}
     fi
 }
 
-[[ $- == *i* ]] && bind -x '"\C-b": __gistory_bookmarks'
+[[ $- == *i* ]] && bind -x '"\C-b": __xbh_bookmarks'
 ```
 
 After adding (or updating) your bindings, reload your bashrc:

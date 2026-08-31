@@ -48,17 +48,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every project under x*/ . `bin` is the binary each build produces
-        # (Go module name / Cargo package name), which differs from the dir name.
+        # Every project under x*/ . Each project's Go module / Cargo package is
+        # named after its directory, so `dir` is also the binary name.
         project:
-          - { dir: xbh, lang: go, bin: gistory }
-          - { dir: xmem, lang: go, bin: memory-analysis }
-          - { dir: xgit, lang: rust, bin: gitsync }
-          - { dir: xls, lang: rust, bin: xls }
+          - { dir: xbh, lang: go }
+          - { dir: xmem, lang: go }
+          - { dir: xgit, lang: rust }
+          - { dir: xls, lang: rust }
           # libghostty-vt-sys compiles Ghostty from source with zig, and Ghostty
           # rejects newer zig versions. Bump only together with the crate.
-          - { dir: xmux, lang: rust, bin: rmux, zig: "0.15.2", extras: "rmux.service default-config.yaml" }
-          - { dir: xssh, lang: rust, bin: sssh, extras: "config.yaml.example policy.json" }
+          - { dir: xmux, lang: rust, zig: "0.15.2", extras: "xmux.service default-config.yaml" }
+          - { dir: xssh, lang: rust, extras: "config.yaml.example policy.json" }
         # Native runners for both architectures rather than cross-compiling:
         # xgit bundles SQLite and xmux builds Ghostty via zig, both of which are
         # far more trouble to cross-compile than a second runner is to rent.
@@ -102,19 +102,19 @@ jobs:
         working-directory: ${{ matrix.project.dir }}
         env:
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags "-s -w" -o "${{ matrix.project.bin }}" .
+        run: go build -trimpath -ldflags "-s -w" -o "${{ matrix.project.dir }}" .
 
       - name: Build (Rust)
         if: matrix.project.lang == 'rust'
         working-directory: ${{ matrix.project.dir }}
         run: |
           cargo build --release --locked
-          strip "target/release/${{ matrix.project.bin }}"
+          strip "target/release/${{ matrix.project.dir }}"
 
       - name: Package
         working-directory: ${{ matrix.project.dir }}
         env:
-          BIN: ${{ matrix.project.bin }}
+          BIN: ${{ matrix.project.dir }}
           LANG_KIND: ${{ matrix.project.lang }}
           EXTRAS: ${{ matrix.project.extras }}
           ARCH: ${{ matrix.arch.name }}

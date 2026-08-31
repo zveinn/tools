@@ -6,9 +6,10 @@ data
 # sub-repo .git dirs were removed).
 target/
 
-# Go binaries built in-tree by the projects' own build scripts.
-/xbh/gistory
-/xmem/memory-analysis
+# Go binaries built in-tree by the projects' own build scripts. Each is named
+# after its directory, so the path doubles up.
+/xbh/xbh
+/xmem/xmem
 
 # Release packaging scratch dirs used by .github/workflows/release.yml.
 # Unanchored: the workflow stages into <project>/dist/ as well as ./artifacts/.

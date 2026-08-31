@@ -31,7 +31,7 @@ pub fn run(
     cmd_tx: UnboundedSender<SyncCmd>,
 ) -> Result<()> {
     if !std::io::stdout().is_terminal() {
-        bail!("gitsync needs a real terminal (stdout is not a TTY)");
+        bail!("xgit needs a real terminal (stdout is not a TTY)");
     }
     let mut terminal = ratatui::try_init()?;
     let mut app = App::new(db, cfg, ev_rx, cmd_tx);

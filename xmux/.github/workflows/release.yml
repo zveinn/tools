@@ -39,12 +39,12 @@ jobs:
 
       - name: Package
         run: |
-          strip target/release/rmux
-          mkdir -p dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
-          cp target/release/rmux rmux.service default-config.yaml README.md \
-            dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux/
-          tar -C dist -czf dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux.tar.gz \
-            rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
+          strip target/release/xmux
+          mkdir -p dist/xmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
+          cp target/release/xmux xmux.service default-config.yaml README.md \
+            dist/xmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux/
+          tar -C dist -czf dist/xmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux.tar.gz \
+            xmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
 
       - name: Create release
         uses: softprops/action-gh-release@v2

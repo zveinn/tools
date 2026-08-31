@@ -24,9 +24,9 @@ pub fn init_logging(cfg: &Config, verbose: bool) -> Result<()> {
         .open(&cfg.log_path)
         .with_context(|| format!("open log {}", cfg.log_path.display()))?;
     let filter = if verbose {
-        EnvFilter::new("gitsync=debug,info")
+        EnvFilter::new("xgit=debug,info")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("gitsync=info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("xgit=info"))
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)

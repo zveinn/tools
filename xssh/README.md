@@ -1,4 +1,4 @@
-# sssh
+# xssh
 
 SSH with private keys stored encrypted in S3. Keys are encrypted client-side
 (argon2id + ChaCha20-Poly1305) before upload, fetched and decrypted in memory
@@ -7,15 +7,15 @@ written to disk and the bucket only ever sees ciphertext.
 
 ## How it works
 
-1. `sssh add-key` encrypts a private key with a key derived from your
+1. `xssh add-key` encrypts a private key with a key derived from your
    password (argon2id with a random per-key salt) and uploads it to an S3
    bucket (MinIO or any S3-compatible store). Each key gets its own salt,
    stored alongside the ciphertext, so no two keys ever share a derived key.
-   `sssh gen-key` does the same with a freshly generated ed25519 key that
-   never exists outside process memory, and `sssh pub-key` prints the
+   `xssh gen-key` does the same with a freshly generated ed25519 key that
+   never exists outside process memory, and `xssh pub-key` prints the
    public key of a stored key (for `authorized_keys`) without writing
    anything to disk.
-2. `sssh connect <alias>` fetches the encrypted key, prompts for your
+2. `xssh connect <alias>` fetches the encrypted key, prompts for your
    password and decrypts it in memory.
 3. The key goes into an anonymous in-memory file (`memfd_create`) and
    `ssh -i` is pointed at it. It never touches the filesystem.
@@ -26,7 +26,7 @@ written to disk and the bucket only ever sees ciphertext.
 
 ```bash
 cargo build --release
-sudo cp target/release/sssh /usr/local/bin/
+sudo cp target/release/xssh /usr/local/bin/
 ```
 
 Or grab a binary from the releases page.
@@ -38,9 +38,9 @@ in `policy.json`, scoped to the `ssh-keys` bucket):
 
 ```bash
 mc mb myminio/ssh-keys
-mc admin user add myminio sssh 'ChangeMePlease'
-mc admin policy create myminio sssh-keys-rw policy.json
-mc admin policy attach myminio sssh-keys-rw --user sssh
+mc admin user add myminio xssh 'ChangeMePlease'
+mc admin policy create myminio xssh-keys-rw policy.json
+mc admin policy attach myminio xssh-keys-rw --user xssh
 ```
 
 Use that user's credentials in the config below. If you rename the bucket,
@@ -65,35 +65,35 @@ Keep the file `chmod 600` — it holds the S3 secret. Aliases are added by
 Add a key (encrypts it locally, uploads it, creates the alias):
 
 ```bash
-sssh add-key myserver root@203.0.113.10 myserver ~/.ssh/id_ed25519
+xssh add-key myserver root@203.0.113.10 myserver ~/.ssh/id_ed25519
 ```
 
 Or generate a brand-new ed25519 key that never exists outside memory — it is
 created in-process, encrypted and uploaded without ever touching disk:
 
 ```bash
-sssh gen-key myserver root@203.0.113.10 myserver
+xssh gen-key myserver root@203.0.113.10 myserver
 ```
 
 Connect:
 
 ```bash
-sssh connect myserver
-sssh c myserver -L 8080:localhost:8080   # extra args are passed to ssh
+xssh connect myserver
+xssh c myserver -L 8080:localhost:8080   # extra args are passed to ssh
 ```
 
 Print the public key for a stored private key (fetches and decrypts it in
 memory, derives the public key in-process, never writes to disk):
 
 ```bash
-sssh pub-key myserver
+xssh pub-key myserver
 ```
 
 List keys (aliases from the config cross-checked against the bucket — also
 shows objects with no alias and aliases whose object is gone):
 
 ```bash
-sssh list-keys
+xssh list-keys
 ```
 
 Delete a key (removes the encrypted object from the bucket and the alias
@@ -101,7 +101,7 @@ from the config — asks you to type the alias back, since the bucket holds
 the only copy):
 
 ```bash
-sssh del-key myserver
+xssh del-key myserver
 ```
 
 Every command has shortcuts:
@@ -126,5 +126,5 @@ and cannot be used as alias names.
 - To watch the key appear and disappear from memory:
 
   ```bash
-  watch -n 0.2 "find /proc/[0-9]*/fd -lname '/memfd:sssh-key*' 2>/dev/null"
+  watch -n 0.2 "find /proc/[0-9]*/fd -lname '/memfd:xssh-key*' 2>/dev/null"
   ```

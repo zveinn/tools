@@ -812,32 +812,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gitsync"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "chrono",
- "clap",
- "crossterm",
- "dirs",
- "futures",
- "open",
- "ratatui",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "unicode-width",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,6 +3335,32 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xgit"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "futures",
+ "open",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+]
 
 [[package]]
 name = "yoke"

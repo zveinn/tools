@@ -252,7 +252,7 @@ pub struct Session {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
-    /// Created via `rmux agent new`: listed separately in the session
+    /// Created via `xmux agent new`: listed separately in the session
     /// manager and addressable by the agent commands, but otherwise a
     /// normal session.
     pub agent: bool,

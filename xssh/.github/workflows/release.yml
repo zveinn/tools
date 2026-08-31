@@ -22,13 +22,13 @@ jobs:
 
       - name: Package
         run: |
-          tar -C target/release -czf sssh-${{ github.ref_name }}-x86_64-linux.tar.gz sssh
-          sha256sum sssh-${{ github.ref_name }}-x86_64-linux.tar.gz > sssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
+          tar -C target/release -czf xssh-${{ github.ref_name }}-x86_64-linux.tar.gz xssh
+          sha256sum xssh-${{ github.ref_name }}-x86_64-linux.tar.gz > xssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            sssh-${{ github.ref_name }}-x86_64-linux.tar.gz
-            sssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
+            xssh-${{ github.ref_name }}-x86_64-linux.tar.gz
+            xssh-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
           generate_release_notes: true

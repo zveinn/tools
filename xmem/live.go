@@ -390,7 +390,7 @@ func renderGrid(start time.Time, interval time.Duration,
 	var b strings.Builder
 	b.WriteString("\033[H\033[2J")
 	rate := uint64(float64(ev) / interval.Seconds())
-	b.WriteString(bold(fmt.Sprintf(" memory-analysis live · %s · up %s · %d ev/s",
+	b.WriteString(bold(fmt.Sprintf(" xmem live · %s · up %s · %d ev/s",
 		time.Now().Format("15:04:05"), time.Since(start).Round(time.Second), rate)))
 	if lost > 0 {
 		b.WriteString(yellow(fmt.Sprintf(" · LOST %d", lost)))

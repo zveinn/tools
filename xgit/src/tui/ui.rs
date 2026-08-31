@@ -79,7 +79,7 @@ fn draw_title(frame: &mut Frame, app: &App, area: Rect) {
 
     let left = Line::from(vec![
         Span::styled(
-            " gitsync ",
+            " xgit ",
             Style::new().fg(Color::Black).bg(Theme::PURPLE).bold(),
         ),
         Span::raw("  "),
@@ -793,7 +793,7 @@ fn truncate_line(line: Line<'static>, width: u16) -> Line<'static> {
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let text = "\
-gitsync
+xgit
 
 Views   (h / l  or  ← →)
   Inbox         notifications, review requests, assignments waiting on you

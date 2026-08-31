@@ -59,7 +59,7 @@ enum SavedDir {
     Vertical,
 }
 
-/// Where the state lives (`~/.config/rmux/layout.json`).
+/// Where the state lives (`~/.config/xmux/layout.json`).
 fn path() -> Option<std::path::PathBuf> {
     Some(config::path()?.parent()?.join("layout.json"))
 }

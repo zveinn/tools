@@ -1,5 +1,5 @@
 [package]
-name = "gitsync"
+name = "xgit"
 version = "0.1.2"
 edition = "2024"
 description = "Local-first GitHub issues and pull requests TUI"

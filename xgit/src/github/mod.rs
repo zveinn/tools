@@ -15,7 +15,7 @@ use crate::model::{HydratedItem, Role};
 
 pub use parse::comments_from_value;
 
-const USER_AGENT: &str = concat!("gitsync/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("xgit/", env!("CARGO_PKG_VERSION"));
 const API_VERSION: &str = "2022-11-28";
 
 #[derive(Debug, Clone, Default)]

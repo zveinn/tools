@@ -1,24 +1,24 @@
-# System service for the rmux terminal multiplexer server.
+# System service for the xmux terminal multiplexer server.
 #
 # Runs at boot as a system-wide service, independent of login sessions —
 # sessions survive SSH logouts with no `loginctl enable-linger` needed.
 #
-# Edit User= for your username (and ExecStart= if rmux lives somewhere
+# Edit User= for your username (and ExecStart= if xmux lives somewhere
 # other than /usr/local/bin), then:
-#   sudo cp rmux.service /etc/systemd/system/
+#   sudo cp xmux.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now rmux
+#   sudo systemctl enable --now xmux
 #
-# Logs: journalctl -u rmux
+# Logs: journalctl -u xmux
 
 [Unit]
-Description=rmux terminal multiplexer server (libghostty-vt)
+Description=xmux terminal multiplexer server (libghostty-vt)
 After=local-fs.target
 
 [Service]
 # The server (and every shell it spawns) runs as this user, never root.
 User=[YOUR_USER]
-ExecStart=/usr/local/bin/rmux server --config [PATH_TO_CONFIG_DIR (optional)]
+ExecStart=/usr/local/bin/xmux server --config [PATH_TO_CONFIG_DIR (optional)]
 Restart=on-failure
 
 # Signal only the server, not the panes. The server saves the layout and

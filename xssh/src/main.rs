@@ -179,7 +179,7 @@ fn decrypt_key(blob: &[u8], password: &str) -> Result<Vec<u8>, String> {
     let header = MAGIC.len() + SALT_LEN + NONCE_LEN;
     if blob.len() < header || &blob[..MAGIC.len()] != MAGIC {
         return Err(
-            "object is not an sssh-encrypted key (re-upload it with `sssh add-key`)".to_string(),
+            "object is not an xssh-encrypted key (re-upload it with `xssh add-key`)".to_string(),
         );
     }
     let salt = &blob[MAGIC.len()..MAGIC.len() + SALT_LEN];
@@ -341,7 +341,7 @@ async fn add_key(alias: &str, target: &str, s3_key: &str, key_path: &str) -> Res
 
 // Generate a fresh ed25519 keypair entirely in memory: the private key is
 // encrypted and uploaded without ever existing outside this process, and the
-// public key is discarded — derive it any time with `sssh pub-key <alias>`.
+// public key is discarded — derive it any time with `xssh pub-key <alias>`.
 async fn gen_key(alias: &str, target: &str, s3_key: &str) -> Result<(), String> {
     reserved_alias_check(alias)?;
 
@@ -392,7 +392,7 @@ async fn gen_key(alias: &str, target: &str, s3_key: &str) -> Result<(), String> 
         alias, target, s3_key, fingerprint
     );
     eprintln!(
-        "Run `sssh pub-key {}` to print the public key for authorized_keys.",
+        "Run `xssh pub-key {}` to print the public key for authorized_keys.",
         alias
     );
     Ok(())
@@ -564,7 +564,7 @@ fn create_key_memfd(key: &[u8]) -> Result<File, String> {
     // Anonymous in-memory file: never touches the filesystem, vanishes when
     // the last fd to it is closed. ssh reads it via /proc/<our-pid>/fd/N, so
     // the fd only needs to live in this process (CLOEXEC keeps it out of ssh).
-    let fd = unsafe { libc::memfd_create(c"sssh-key".as_ptr(), libc::MFD_CLOEXEC) };
+    let fd = unsafe { libc::memfd_create(c"xssh-key".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(format!(
             "memfd_create failed: {}",
@@ -626,7 +626,7 @@ fn exec_ssh(target: &str, key_fd: RawFd, extra_args: &[String]) -> Result<(), St
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    // The key exists only as a memfd held open by this (sssh) process. ssh
+    // The key exists only as a memfd held open by this (xssh) process. ssh
     // closes all inherited fds above stderr at startup (closefrom), so it
     // cannot see the fd as /proc/self/fd/N — instead point it at our copy,
     // which stays open for the whole session. IdentitiesOnly pins ssh to
@@ -637,7 +637,7 @@ fn exec_ssh(target: &str, key_fd: RawFd, extra_args: &[String]) -> Result<(), St
         .arg(format!("/proc/{}/fd/{}", std::process::id(), key_fd));
     cmd.env_remove("SSH_AUTH_SOCK");
 
-    // LocalCommand runs after authentication succeeds — tell sssh to
+    // LocalCommand runs after authentication succeeds — tell xssh to
     // release the key (see close_key_fd)
     cmd.arg("-o").arg("PermitLocalCommand=yes");
     cmd.arg("-o")
@@ -754,7 +754,7 @@ async fn connect(alias: &str, extra_args: &[String]) -> Result<(), String> {
     data.zeroize();
 
     // Hand ownership of the fd to the signal handler: it is closed on
-    // SIGUSR1 (post-auth), or by the kernel when sssh exits.
+    // SIGUSR1 (post-auth), or by the kernel when xssh exits.
     let key_fd = key_file.into_raw_fd();
     install_key_release_handler(key_fd)?;
 
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_magic() {
-        assert!(decrypt_key(b"not-an-sssh-blob at all", "pw").is_err());
+        assert!(decrypt_key(b"not-an-xssh-blob at all", "pw").is_err());
     }
 
     #[test]

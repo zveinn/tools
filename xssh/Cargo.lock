@@ -2348,26 +2348,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sssh"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "bytes",
- "chacha20poly1305",
- "dirs",
- "futures-util",
- "libc",
- "minio",
- "rpassword",
- "serde",
- "serde_yaml",
- "ssh-key",
- "tokio",
- "which",
- "zeroize",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3072,6 +3052,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbc04313cab124e498ab1724e739720807b6dc405b9ed0edc5860164d2e4ff70"
 dependencies = [
  "xml",
+]
+
+[[package]]
+name = "xssh"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "bytes",
+ "chacha20poly1305",
+ "dirs",
+ "futures-util",
+ "libc",
+ "minio",
+ "rpassword",
+ "serde",
+ "serde_yaml",
+ "ssh-key",
+ "tokio",
+ "which",
+ "zeroize",
 ]
 
 [[package]]
