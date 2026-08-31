@@ -100,7 +100,9 @@ pub struct LinuxExtras {
 
 pub fn user_name(uid: u32) -> String {
     unsafe {
-        let mut buf = [0i8; 1024];
+        // c_char, not i8: it is signed on x86_64 but unsigned on aarch64, so a
+        // hardcoded [0i8; N] compiles on amd64 and fails to build on arm64.
+        let mut buf = [0 as libc::c_char; 1024];
         let mut pwd: libc::passwd = std::mem::zeroed();
         let mut result = std::ptr::null_mut();
         if libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) == 0
@@ -114,7 +116,8 @@ pub fn user_name(uid: u32) -> String {
 
 pub fn group_name(gid: u32) -> String {
     unsafe {
-        let mut buf = [0i8; 1024];
+        // See user_name: c_char's signedness is target-dependent.
+        let mut buf = [0 as libc::c_char; 1024];
         let mut grp: libc::group = std::mem::zeroed();
         let mut result = std::ptr::null_mut();
         if libc::getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) == 0
