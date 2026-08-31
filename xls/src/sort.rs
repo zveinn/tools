@@ -9,13 +9,13 @@ use crate::entry::Entry;
 /// Sort `entries` by `key` in **ascending** order.
 /// Ties break on name ascending (case-insensitive).
 pub fn sort_entries(entries: &mut [Entry], key: Column) {
-    entries.sort_by(|a, b| {
-        cmp_asc(a, b, key).then_with(|| {
-            a.name
-                .to_ascii_lowercase()
-                .cmp(&b.name.to_ascii_lowercase())
-        })
-    });
+    entries.sort_by(|a, b| entry_order(a, b, key));
+}
+
+/// Ascending order for two entries by `key`, ties broken on name.
+/// Also used to order the per-directory sections of a multi-operand listing.
+pub fn entry_order(a: &Entry, b: &Entry, key: Column) -> Ordering {
+    cmp_asc(a, b, key).then_with(|| cmp_str_ci(&a.name, &b.name))
 }
 
 fn cmp_asc(a: &Entry, b: &Entry, key: Column) -> Ordering {

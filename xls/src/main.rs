@@ -16,14 +16,14 @@ use format::{
     ColorMode, DIM, GREEN, LIGHT_BLUE, ORANGE, RED, RESET, SOFT_BLUE, WHITE, Widths, init_color,
     write_entry, write_entry_cards, write_header,
 };
-use sort::sort_entries;
+use sort::{entry_order, sort_entries};
 
 enum Cli {
     Help {
         color: ColorMode,
     },
     List {
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         columns: Vec<Column>,
         sort: Option<Column>,
         headers: bool,
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Cli::List {
-            path,
+            paths,
             columns,
             sort,
             headers,
@@ -51,11 +51,17 @@ fn main() -> ExitCode {
             color,
         }) => {
             init_color(color);
-            if let Err(e) = run(&path, &columns, sort, headers, table, cards) {
-                eprintln!("{RED}xls: {e}{RESET}");
-                return ExitCode::FAILURE;
+            match run(&paths, &columns, sort, headers, table, cards) {
+                // Individual operands that failed were already reported.
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                // The reader closed early (`xls x* | head`) — not an error.
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{RED}xls: {e}{RESET}");
+                    ExitCode::FAILURE
+                }
             }
-            ExitCode::SUCCESS
         }
         Err(msg) => {
             // Best-effort color for errors (auto).
@@ -79,7 +85,7 @@ fn parse_color_mode(s: &str) -> Result<ColorMode, String> {
 }
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
-    let mut path = None;
+    let mut paths: Vec<PathBuf> = Vec::new();
     let mut help = false;
     let mut sort = None;
     let mut headers = true;
@@ -147,12 +153,9 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
                 sort = Some(Column::parse(field)?);
             }
             s if s.starts_with('-') => return Err(format!("unknown flag {s}")),
-            s => {
-                if path.is_some() {
-                    return Err("only one path is supported".into());
-                }
-                path = Some(PathBuf::from(s));
-            }
+            // Any number of operands: the shell expands globs like `x*` into
+            // one argument per match.
+            s => paths.push(PathBuf::from(s)),
         }
         i += 1;
     }
@@ -171,8 +174,12 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         columns.unwrap_or_else(Column::defaults)
     };
 
+    if paths.is_empty() {
+        paths.push(PathBuf::from("."));
+    }
+
     Ok(Cli::List {
-        path: path.unwrap_or_else(|| PathBuf::from(".")),
+        paths,
         columns,
         sort,
         headers,
@@ -199,8 +206,12 @@ fn print_help() {
 {h}xls{RESET} — colored directory listing
 
 {h}USAGE{RESET}
-  {k}xls{RESET} [{k}--all{RESET}|{k}--columns{RESET} {k}COLS{RESET}] [{k}--sort{RESET} {k}COL{RESET}] [{k}--cards{RESET}] [{k}--color{RESET} {k}WHEN{RESET}] [{k}path{RESET}]
+  {k}xls{RESET} [{k}--all{RESET}|{k}--columns{RESET} {k}COLS{RESET}] [{k}--sort{RESET} {k}COL{RESET}] [{k}--cards{RESET}] [{k}--color{RESET} {k}WHEN{RESET}] [{k}path{RESET}...]
   {k}xls{RESET} [{k}-h{RESET}|{k}--help{RESET}]
+
+  Multiple paths are listed in sequence: files first, then one labelled
+  section per directory. Shell globs work as usual ({k}xls x*{RESET}), since the
+  shell expands them into separate paths before {k}xls{RESET} runs.
 
 {h}OPTIONS{RESET}
   {k}--all{RESET}             Show every column in a sensible order
@@ -280,6 +291,8 @@ fn print_help() {
 {h}EXAMPLES{RESET}
   {k}xls{RESET}
   {k}xls /var/log{RESET}
+  {k}xls src/*.rs{RESET}
+  {k}xls x* --sort MTIME{RESET}
   {k}xls --all{RESET}
   {k}xls --cards{RESET}
   {k}xls --all --cards{RESET}
@@ -290,62 +303,164 @@ fn print_help() {
     );
 }
 
+/// A command-line operand that turned out to be a directory. `entry` is only
+/// used to order the sections; the listing itself comes from reading `path`.
+struct DirOperand {
+    path: PathBuf,
+    entry: Entry,
+}
+
+/// Returns `Ok(false)` when some operand failed but the rest were listed;
+/// `Err` only for a failure to write the listing itself.
 fn run(
-    path: &Path,
+    paths: &[PathBuf],
     columns: &[Column],
     sort: Option<Column>,
     headers: bool,
     table: bool,
     cards: bool,
-) -> io::Result<()> {
-    let mut detail = Column::max_detail(columns);
-    if let Some(key) = sort {
-        detail = detail.max(key.min_detail());
-    }
+) -> io::Result<bool> {
+    // Default sort is name ascending, which is just the NAME key.
+    let key = sort.unwrap_or(Column::Name);
+    let detail = Column::max_detail(columns).max(key.min_detail());
 
-    let meta = fs::symlink_metadata(path)?;
+    let mut ok = true;
 
-    let mut entries = if meta.is_dir() {
-        let mut v = Vec::new();
-        for ent in fs::read_dir(path)? {
-            let ent = ent?;
-            let name = ent.file_name().to_string_lossy().into_owned();
-            match Entry::collect(ent.path(), name, detail) {
-                Ok(e) => v.push(e),
-                Err(err) => eprintln!("{RED}xls: {}: {err}{RESET}", ent.path().display()),
+    // Stat every operand first so we can split them the way ls does: all
+    // non-directories in one listing, then a section per directory.
+    let mut files: Vec<Entry> = Vec::new();
+    let mut dirs: Vec<DirOperand> = Vec::new();
+    for path in paths {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(err) => {
+                eprintln!("{RED}xls: {}: {err}{RESET}", path.display());
+                ok = false;
+                continue;
             }
+        };
+        // Operands keep the name as typed, so `xls */*.md` stays unambiguous.
+        let entry = match Entry::collect(path.clone(), operand_name(path), detail) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("{RED}xls: {}: {err}{RESET}", path.display());
+                ok = false;
+                continue;
+            }
+        };
+        // Symlinks to directories show as a single row, not as their contents.
+        if meta.is_dir() {
+            dirs.push(DirOperand {
+                path: path.clone(),
+                entry,
+            });
+        } else {
+            files.push(entry);
         }
-        v
-    } else {
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        vec![Entry::collect(path.to_path_buf(), name, detail)?]
-    };
-
-    match sort {
-        Some(key) => sort_entries(&mut entries, key),
-        None => entries.sort_by(|a, b| {
-            a.name
-                .to_ascii_lowercase()
-                .cmp(&b.name.to_ascii_lowercase())
-        }),
     }
+
+    if files.is_empty() && dirs.is_empty() {
+        return Ok(ok);
+    }
+
+    sort_entries(&mut files, key);
+    dirs.sort_by(|a, b| entry_order(&a.entry, &b.entry, key));
+
+    // ls labels each section once more than one operand is on the command line.
+    let labels = paths.len() > 1;
 
     let mut out = io::stdout().lock();
     // Blank line so the listing separates cleanly from the shell prompt.
     writeln!(out)?;
-    if cards {
-        write_entry_cards(&mut out, &entries, columns, headers)?;
-    } else {
-        let widths = Widths::measure(&entries, columns);
-        if headers {
-            write_header(&mut out, columns, &widths, table)?;
+
+    let mut first = true;
+    if !files.is_empty() {
+        write_listing(&mut out, &files, columns, headers, table, cards)?;
+        first = false;
+    }
+
+    for dir in &dirs {
+        // Card rows already end in a blank line, so they need no separator.
+        if !first && !cards {
+            writeln!(out)?;
         }
-        for e in &entries {
-            write_entry(&mut out, e, columns, &widths, table)?;
+        first = false;
+        if labels {
+            writeln!(out, "{SOFT_BLUE}{}:{RESET}", dir.entry.name)?;
+        }
+        match read_dir_entries(&dir.path, detail) {
+            Ok((mut entries, entries_ok)) => {
+                ok &= entries_ok;
+                sort_entries(&mut entries, key);
+                write_listing(&mut out, &entries, columns, headers, table, cards)?;
+            }
+            Err(err) => {
+                out.flush()?;
+                eprintln!("{RED}xls: {}: {err}{RESET}", dir.path.display());
+                ok = false;
+            }
         }
     }
-    out.flush()
+
+    out.flush()?;
+    Ok(ok)
+}
+
+/// Name shown for an operand: the string the user typed, minus any trailing
+/// slash. Entries *inside* a directory keep using their bare file name.
+fn operand_name(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty() {
+        s.into_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Collect one directory's entries. Unreadable entries are reported and
+/// skipped; the `bool` is false when that happened.
+fn read_dir_entries(path: &Path, detail: u8) -> io::Result<(Vec<Entry>, bool)> {
+    let mut ok = true;
+    let mut entries = Vec::new();
+    for ent in fs::read_dir(path)? {
+        let ent = match ent {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("{RED}xls: {}: {err}{RESET}", path.display());
+                ok = false;
+                continue;
+            }
+        };
+        let name = ent.file_name().to_string_lossy().into_owned();
+        match Entry::collect(ent.path(), name, detail) {
+            Ok(e) => entries.push(e),
+            Err(err) => {
+                eprintln!("{RED}xls: {}: {err}{RESET}", ent.path().display());
+                ok = false;
+            }
+        }
+    }
+    Ok((entries, ok))
+}
+
+fn write_listing(
+    out: &mut impl Write,
+    entries: &[Entry],
+    columns: &[Column],
+    headers: bool,
+    table: bool,
+    cards: bool,
+) -> io::Result<()> {
+    if cards {
+        return write_entry_cards(out, entries, columns, headers);
+    }
+    let widths = Widths::measure(entries, columns);
+    if headers {
+        write_header(out, columns, &widths, table)?;
+    }
+    for e in entries {
+        write_entry(out, e, columns, &widths, table)?;
+    }
+    Ok(())
 }

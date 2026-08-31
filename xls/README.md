@@ -62,6 +62,10 @@ xls
 # List a path
 xls /var/log
 
+# Several paths, or a shell glob (the shell expands it into separate paths)
+xls src/*.rs
+xls x* --sort MTIME
+
 # Everything
 xls --all
 
@@ -102,6 +106,8 @@ xls --color=always | less -R
 **Notes**
 
 - `--all` and `--columns` cannot be used together.
+- Any number of paths may be given. Non-directories are listed first in one table, then each directory gets its own labelled section (`path:`), like `ls`. Labels appear only when more than one path is given. Paths are shown as typed (minus any trailing slash), so `xls */*.md` stays unambiguous.
+- An unreadable path is reported on stderr and skipped; the remaining paths are still listed and the exit status is non-zero.
 - Color is off when stdout is not a TTY (e.g. pipes). Also respects `NO_COLOR`, `CLICOLOR=0`, and `CLICOLOR_FORCE` / `FORCE_COLOR`.
 - `--cards` renders each entry as a bordered card (multiple per row when space allows).
 
