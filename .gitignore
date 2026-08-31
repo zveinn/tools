@@ -11,8 +11,9 @@ target/
 /xmem/memory-analysis
 
 # Release packaging scratch dirs used by .github/workflows/release.yml.
-/dist/
-/artifacts/
+# Unanchored: the workflow stages into <project>/dist/ as well as ./artifacts/.
+dist/
+artifacts/
 
 # Machine-local agent state.
 .claude/settings.local.json

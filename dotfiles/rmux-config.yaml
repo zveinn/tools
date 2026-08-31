@@ -1,0 +1,35 @@
+accent: "#8b59ff"
+shell: /usr/bin/bash
+start_dir: /home/sveinn/code
+scrollback_lines: 10000
+select_copy: true
+bar_position: top
+
+terminal_envs:
+  TERM: xterm-256color
+
+commands:
+  ctrl+l: lazygit
+  ctrl+h: htop
+
+keybindings:
+  session-manager: alt+o
+  tab-manager: alt+p
+  split-horizontal: alt+n
+  split-vertical: ctrl+n
+  focus-left: alt+h
+  focus-right: alt+l
+  focus-up: alt+k
+  focus-down: alt+j
+  detach: alt+\
+  fullscreen: alt+m
+  terminal-settings: alt+s
+
+sessions:
+  1: { name: ec, key: alt+1 }
+  2: { name: eos, key: alt+2 }
+  3: { name: tunnels, key: alt+3 }
+  4: { name: crypto, key: alt+4 }
+  5: { name: rmux, key: alt+5 }
+  6: { name: sssh, key: alt+6 }
+  7: { name: xls, key: F7 }

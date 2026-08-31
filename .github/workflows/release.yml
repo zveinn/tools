@@ -1,0 +1,183 @@
+name: release
+
+# Tags only. A tag push carries no branch context, so the `guard` job below is
+# what actually enforces "tags on main" — see the comment there.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag push event has no branch, and `on.push.tags` cannot be filtered by
+  # branch (GitHub ignores `branches` when `tags` is present). So we resolve the
+  # tag to a commit and assert it is an ancestor of origin/main; a tag cut from
+  # a feature branch or a detached commit fails here before anything is built.
+  guard:
+    name: tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is reachable from main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          # ^{commit} dereferences annotated tags to the underlying commit;
+          # fall back to the event SHA if the tag ref was not fetched locally.
+          commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}" 2>/dev/null \
+            || git rev-parse "${GITHUB_SHA}^{commit}")
+          if git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "$GITHUB_REF_NAME -> $commit is on main"
+          else
+            echo "::error::Tag $GITHUB_REF_NAME ($commit) is not an ancestor of main; refusing to release."
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.project.dir }} (${{ matrix.arch.name }})
+    needs: guard
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every project under x*/ . `bin` is the binary each build produces
+        # (Go module name / Cargo package name), which differs from the dir name.
+        project:
+          - { dir: xbh, lang: go, bin: gistory }
+          - { dir: xmem, lang: go, bin: memory-analysis }
+          - { dir: xgit, lang: rust, bin: gitsync }
+          - { dir: xls, lang: rust, bin: xls }
+          # libghostty-vt-sys compiles Ghostty from source with zig, and Ghostty
+          # rejects newer zig versions. Bump only together with the crate.
+          - { dir: xmux, lang: rust, bin: rmux, zig: "0.15.2", extras: "rmux.service default-config.yaml" }
+          - { dir: xssh, lang: rust, bin: sssh, extras: "config.yaml.example policy.json" }
+        # Native runners for both architectures rather than cross-compiling:
+        # xgit bundles SQLite and xmux builds Ghostty via zig, both of which are
+        # far more trouble to cross-compile than a second runner is to rent.
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: matrix.project.lang == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.project.dir }}/go.mod
+          # These builds take seconds and xmem has no go.sum for the cache key
+          # to hash, so module caching is more failure surface than it is win.
+          cache: false
+
+      - name: Set up Rust
+        if: matrix.project.lang == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        if: matrix.project.lang == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.project.dir }}
+          key: ${{ matrix.arch.name }}
+
+      - name: Set up Zig
+        if: matrix.project.zig != ''
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.project.zig }}
+
+      - name: Build (Go)
+        if: matrix.project.lang == 'go'
+        working-directory: ${{ matrix.project.dir }}
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w" -o "${{ matrix.project.bin }}" .
+
+      - name: Build (Rust)
+        if: matrix.project.lang == 'rust'
+        working-directory: ${{ matrix.project.dir }}
+        run: |
+          cargo build --release --locked
+          strip "target/release/${{ matrix.project.bin }}"
+
+      - name: Package
+        working-directory: ${{ matrix.project.dir }}
+        env:
+          BIN: ${{ matrix.project.bin }}
+          LANG_KIND: ${{ matrix.project.lang }}
+          EXTRAS: ${{ matrix.project.extras }}
+          ARCH: ${{ matrix.arch.name }}
+        run: |
+          set -euo pipefail
+          stage="${BIN}-${GITHUB_REF_NAME}-linux-${ARCH}"
+          mkdir -p "dist/${stage}" "${GITHUB_WORKSPACE}/artifacts"
+
+          if [ "$LANG_KIND" = "go" ]; then
+            cp "$BIN" "dist/${stage}/"
+          else
+            cp "target/release/${BIN}" "dist/${stage}/"
+          fi
+
+          # README is present in every project; LICENSE only in some.
+          cp README.md "dist/${stage}/"
+          if [ -f LICENSE ]; then
+            cp LICENSE "dist/${stage}/"
+          fi
+          for extra in $EXTRAS; do
+            cp "$extra" "dist/${stage}/"
+          done
+
+          tar -C dist -czf "${GITHUB_WORKSPACE}/artifacts/${stage}.tar.gz" "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project.dir }}-${{ matrix.arch.name }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          sha256sum *.tar.gz | tee SHA256SUMS
+          ls -la
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          # A tag like v1.2.0-rc1 ships as a prerelease and does not move
+          # the "latest release" pointer.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS

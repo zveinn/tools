@@ -1,0 +1,359 @@
+#!/bin/bash
+export PATH=$PATH:/usr/local/go/bin:~/go/bin
+export PATH=$HOME/.local/bin:$PATH
+export PATH=$HOME/.bun/bin:$PATH
+export PATH=$HOME/.opencode/bin:$PATH
+
+export GOPATH=~/go
+export COLORTERM=truecolor
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export NOTES_URL=http://geymsla.sveinn.is:6767
+
+source "$HOME/.cargo/env"
+export PATH="$HOME/.grok/bin:$PATH"
+
+# pnpm
+export PNPM_HOME="/home/sveinn/.local/share/pnpm"
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+
+source /home/sveinn/.secrets/secrets.sh
+
+# Everything below is interactive-only: aliases, prompt, completions,
+# keybinds. Keeping them out of scripts and tool wrappers prevents
+# alias breakage (e.g. ls->eza) from leaking into non-interactive
+# shells.
+[[ $- != *i* ]] && return
+
+__gistory() {
+    history -w
+    local selected
+    selected=$(gistory)
+    if [ -n "$selected" ]; then
+        READLINE_LINE="$selected"
+        READLINE_POINT=${#READLINE_LINE}
+    fi
+}
+
+__bgistory() {
+    history -w
+    local selected
+    selected=$(gistory --bookmarks)
+    if [ -n "$selected" ]; then
+        READLINE_LINE="$selected"
+        READLINE_POINT=${#READLINE_LINE}
+    fi
+}
+
+[[ $- == *i* ]] && bind -x '"\C-r": __gistory'
+[[ $- == *i* ]] && bind -x '"\C-b": __bgistory'
+
+
+alias golint="go install tool;gofumpt -w .;go generate ./...;pkill golangci; golangci-lint run --fix --build-tags kqueue --timeout=10m --config .golangci.yml"
+
+function parse_git_branch() {
+  git_branch=$(git branch 2> /dev/null --show-current)
+  if [ -n "$git_branch" ]; then
+    printf ' \e[2;97m·\e[0m \e[38;5;208m%s\e[0m' "$git_branch"
+  fi
+}
+
+export PS1='\n\[\e[2;97m\]╭─\[\e[0m\] \[\e[97m\]\t\[\e[0m\] \[\e[2;97m\]·\[\e[0m\] \[\e[1;38;5;117m\]$(basename "$(dirname "$PWD")")/$(basename "$PWD")\[\e[0m\]$(parse_git_branch)\n\[\e[2;97m\]╰─\[\e[0m\]\[\e[38;5;117m\]❯\[\e[0m\] '
+#export PS1='$(date) $(pwd) > $(parse_git_branch) > '
+  
+pss(){
+	ps aux | grep $1
+}
+lss(){
+    ls | grep "$1"
+}
+
+alias r="source /home/sveinn/code/dotfiles/.brc"
+alias rr="reset"
+alias c="clear"
+alias e="exit"
+alias p="pwd"
+alias u="whoami"
+alias .="cd .."
+alias ..="cd ..;cd .."
+alias ...="cd ..;cd ..;cd .."
+alias ....="cd ..;cd ..;cd ..;cd .."
+alias .....="cd ..;cd ..;cd ..;cd ..;cd .."
+alias ......="cd ..;cd ..;cd ..;cd ..;cd ..;cd .."
+alias ns="netstat -tulpn"
+
+alias ls="xls --columns PERMS,USER,SIZE,NAME --noTable --noHeaders"
+alias ls-mod="xls --sort MTIME  --columns MTIME,PERMS,USER,SIZE,NAME --noTable --noHeaders"
+alias ls-time="xls --columns BIRTH,MTIME,ATIME,CTIME,PERMS,USER,SIZE,NAME"
+alias ls-all="xls --all"
+
+alias ipt="sudo iptables $1"
+alias ipta="sudo iptables -L --line-numbers -n"
+
+
+setup-iptables(){
+ sudo iptables -F
+ sudo iptables -X
+ sudo iptables -t nat -F
+ sudo iptables -t mangle -F
+
+ sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+ sudo iptables -A INPUT --src 127.0.0.1 --dst 127.0.0.1 -j ACCEPT
+
+ sudo iptables -P INPUT DROP
+ sudo iptables -P FORWARD DROP
+ sudo iptables -P OUTPUT ACCEPT
+
+ # allow ssh + file sharing for main pc
+ #sudo iptables -A INPUT --src 192.168.1.19 -p tcp --dport 22 -j ACCEPT
+ #sudo iptables -A INPUT --src 192.168.1.19 -p tcp --dport 445 -j ACCEPT
+
+ # npm dev stuff
+ #sudo iptables -A INPUT --src 192.168.1.19 -p tcp --dport 5173 -j ACCEPT
+ #sudo iptables -A INPUT --src 192.168.1.19 -p tcp --dport 5174 -j ACCEPT
+ sudo iptables-save >> /etc/iptables/iptables.rules 
+ # TODO .. add systemctl command to enable perma tables
+}
+
+gx-pr() {
+	git fetch origin pull/$1/head:pr-$1
+	git checkout pr-$1
+}
+
+gx-sync(){
+	cd ~/code/$1
+	git pull
+	git push fork
+	cd ~/code/$1-fork
+	git pull
+}
+
+alias gx-clone='gClone'
+gClone() {
+  git clone git@github.com:$1
+}
+
+alias gx-new-branch="gBranch"
+gBranch(){
+	git branch $1
+	git checkout $1
+}
+
+setup-repos(){
+ git config --global --add url."git@github.com:".insteadOf "https://github.com/"
+ git config pull.rebase true
+
+ git config --global user.name zveinn
+ git config --global user.email info@sveinn.is
+	
+ mkdir -p ~/code
+ cd ~/code
+ git clone git@github.com:minio/mc mc
+ git clone git@github.com:minio/madmin-go madmin-go
+ git clone git@github.com:minio/minio minio
+ git clone git@github.com:miniohq/eos eos
+ git clone git@github.com:miniohq/ec ec
+
+ git clone git@github.com:zveinn/mc mc-fork
+ git clone git@github.com:zveinn/madmin-go madmin-go-fork
+ git clone git@github.com:zveinn/minio minio-fork
+ git clone git@github.com:zveinn/eos eos-fork
+ git clone git@github.com:zveinn/ec ec-fork
+
+ git clone git@github.com:zveinn/tools
+ git clone git@github.com:zveinn/github-feed
+ git clone git@github.com:zveinn/gistory
+ git clone git@github.com:zveinn/hdnfs
+ git clone git@github.com:zveinn/parser
+ git clone git@github.com:zveinn/dplz
+
+ git clone git@github.com:tunnels-is/tunnels
+ git clone git@github.com:tunnels-is/devops
+ git clone git@github.com:tunnels-is/web
+ git clone git@github.com:tunnels-is/docs
+
+ git clone git@github.com:n00bady/bluam
+
+ cd ~/code/ec
+ git remote add fork git@github.com:zveinn/ec
+ cd ~/code/mc
+ git remote add fork git@github.com:zveinn/mc
+ cd ~/code/madmin-go
+ git remote add fork git@github.com:zveinn/madmin-go
+ cd ~/code/minio
+ git remote add fork git@github.com:zveinn/minio
+ cd ~/code/eos
+ git remote add fork git@github.com:zveinn/eos
+
+}
+
+setup-golang() {
+	wget https://go.dev/dl/go1.25.3.linux-amd64.tar.gz
+	rm -rf /usr/local/go && tar -C /usr/local -xzf go1.25.3.linux-amd64.tar.gz
+	rm go1.25.3.linux-amd64.tar.gz
+	go install github.com/nametake/golangci-lint-langserver@latest
+	go install golang.org/x/tools/gopls@latest
+  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+ 	go install golang.org/x/tools/cmd/goimports@latest
+  go install github.com/go-delve/delve/cmd/dlv@latest
+  go install github.com/jesseduffield/lazygit@latest
+  go install github.com/tinylib/msgp@latest
+  go install golang.org/x/tools/cmd/stringer@latest
+}
+
+setup-non-root() {
+ 	sudo pacman -S git htop wget curl xclip tmux podman net-utils bind eza -y
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.2/install.sh | bash
+ 	curl -fsSL https://get.pnpm.io/install.sh | sh -
+	pnpm install -g typescript-language-server typescript
+
+	ln -s ~/code/dotfiles/helix ~/.config/helix	
+	ln -s ~/code/dotfiles/.tmux.conf ~/.config/tmux/.tmux.conf
+	rm ~/.bashrc
+ 	ln -s ~/code/dotfiles/.brc ~/.bashrc
+
+ 	mkdir -p ~/code/
+ 	cd ~/code
+
+ 	git clone https://aur.archlinux.org/yay.git
+ 	makepgk -si
+}
+
+
+# SYSTEM 76: https://support.system76.com/articles/system76-driver/
+# COSMIC: git@github.com:zveinn/cosmic
+setup-root(){
+ systemctl disable systemd-resolved
+ systemctl stop systemd-resolved
+ systemctl mask systemd-resolved
+ sysctl -w net.ipv6.conf.all.disable_ipv6=1
+ sysctl -w net.ipv6.conf.default.disable_ipv6=1
+ sysctl -p
+ systemctl enable iptables
+}
+
+
+ll(){
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+claude --dangerously-skip-permissions
+#agy --dangerously-skip-permissions
+}
+
+alias llm=ll
+alias tn="zellij -s $1"
+alias ta="zellij attach $1"
+alias ts="zellij action detach;zellij attach $1"
+alias tl="zellij list-sessions"
+alias tkd="zellij kill-session $1; zellij delete-session $1 --force"
+
+alias h="helix -c ~/code/dotfiles/helix/config.toml"
+
+sync-helix(){
+	ln -s ~/.config/dotfiles/helix ~/.config/helix	
+}
+
+alias gaa="git add --all"
+alias gca="git commit -am $1"
+alias gpush="git push"
+alias gpull="git push"
+alias gs="git status"
+alias gl="git log"
+
+alias l="lazygit"
+
+alias d='podman'
+alias ds='podman start'
+alias dst='podman stop'
+alias dr='podman run'
+alias drm='podman remove'
+alias dps='podman ps --all'
+alias dpsa='podman ps --all'
+alias di='podman images'
+alias drmi='podman rmi'
+alias dl='podman logs'
+
+dex(){
+	podman exec -ti "$1" bash
+}
+
+# alias k="kubectl"
+# alias kg="kubectl get"
+# alias ks="kubectl get pod,svc -n kube-system"
+# ka(){
+# 	echo "KIND NETWORK"
+# 	docker network inspect -f '{{.IPAM.Config}}' kind
+# 	echo "NODES"
+# 	echo "=============================================================="
+# 	echo ""
+# 	kubectl get nodes
+# 	echo "=============================================================="
+# 	echo ""
+# 	echo "PODS/SERVICES >>> NAMESPACE: kube-system"
+# 	echo "=============================================================="
+# 	kubectl get pod,svc -n kube-system
+# 	echo "=============================================================="
+# 	echo ""
+# 	echo "PODS/SERVICES >>> NAMESPACE: default"
+# 	echo "=============================================================="
+# 	kubectl get pod,svc -n default
+# 	echo "=============================================================="
+# 	echo ""
+# 	echo "PODS/SERVICES >>> NAMESPACE: minio-operator"
+# 	echo "=============================================================="
+# 	kubectl get pod,svc -n minio-operator
+# 	echo "=============================================================="
+# }
+#
+
+shopt -s expand_aliases
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+
+
+export EZA_COLORS="\
+di=38;5;67:\
+fi=97:\
+ln=38;5;45:\
+ex=38;5;44:\
+sn=38;5;73:\
+pi=38;5;73:\
+bd=38;5;67:\
+cd=38;5;67:\
+or=38;5;203:\
+*.md=38;5;117:\
+*.jpg=38;5;45:\
+*.png=38;5;45:\
+*.log=38;5;146:\
+*.txt=97:\
+*.conf=38;5;44:\
+*.json=38;5;44:\
+*.go=38;5;117:\
+ur=38;5;45:\
+uw=38;5;45:\
+ux=38;5;45:\
+ue=38;5;45:\
+gr=38;5;67:\
+gw=38;5;67:\
+gx=38;5;67:\
+da=97:\
+sz=97:\
+us=97:\
+gr=38;5;67:\
+in=38;5;146:\
+ga=38;5;44:\
+gm=38;5;117:\
+gd=38;5;203:\
+gi=38;5;73:\
+xx=38;5;67"
+
+
+
+
+
+# >>> grok installer >>> (PATH hoisted to the env block up top)
+[[ -r "$HOME/.grok/completions/bash/grok.bash" ]] && source "$HOME/.grok/completions/bash/grok.bash"
+# <<< grok installer <<<

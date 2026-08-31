@@ -1,0 +1,137 @@
+theme = "keyb1nd"
+
+[keys.normal]
+
+"C-k" = ["half_page_up","align_view_center"]
+"C-j" = ["half_page_down","align_view_center"]
+
+"S-l" = "jump_view_right"
+"S-j" = "jump_view_down"
+"S-k" = "jump_view_up"
+"S-h" = "jump_view_left"
+"x" = "no_op"
+"S-v" = ["extend_to_line_bounds", "select_mode"]
+"e"= "expand_selection"
+"r" = "rename_symbol"
+"esc" = "no_op"
+s = ["goto_line_start"]
+p = "paste_after"
+f = ["select_all"]
+
+# this can't be remapped yet.
+#y = ["yank", "yank_to_clipboard"]
+
+[keys.insert]
+"esc" = ["normal_mode"] 
+
+#[keys.normal.space]
+[keys.normal.space]
+y = ["yank_to_primary_clipboard"]
+o = ["file_picker"]
+d = ["vsplit", "goto_definition"]
+n = ["hsplit"]
+p = ["changed_file_picker"]
+# l = ["last_picker"] 
+l = ["file_explorer"]
+# x = [":sh ~/.config/dotfiles/test/test %{file_name}"]
+# x = ":sh %sh{~./config/dotfiles/test/test %{cursor_line} %{buffer_name}}"
+c = ["toggle_comments"]
+# n = ":sh echo %{buffer_name}"
+# x = ':sh /home/sveinn/.config/dotfiles/test/test %sh{pwd} %{cursor_line} %{cursor_column} %{buffer_name} %{language} %{selection_line_start} %{selection_line_end} %{selection}'
+b = ":echo %sh{git blame -L %{cursor_line},+1 %{buffer_name}}"
+2 = ":sh /usr/local/bin/code-analyzer %sh{pwd}/%{buffer_name} %{cursor_line}"
+1 = ":sh /usr/local/bin/code-analyzer scan %sh{pwd}"
+
+h = ":toggle inline-diagnostics.cursor-line hint disable"
+q = ["wclose"]
+f = ["global_search"]
+#e = [":write-all"]
+s = ["workspace_symbol_picker"]
+i = ["goto_implementation"]
+e = ["workspace_diagnostics_picker"]
+r = ["goto_reference"]
+#layer2
+space.d = ["goto_definition"]
+space.a = ["code_action"]
+space.s = ["symbol_picker"]
+space.h = ["hover"]
+# space.h = [":toggle lsp.display-inlay-hints"]
+space.e = ["goto_prev_diag"]
+space.l = [":sh golangci-lint run --build-tags kqueue --timeout=10m --config .golangci.yml;echo done"]
+space.n = [":new"]
+space.r = [":reload-all"]
+
+# space.x = ":sh %{ %{linenumber} %{filename}}"
+#space.x = ["%sh echo %{linenumber}"]
+#layer3
+space.space.r = [":config-reload"]
+space.space.l = [":lsp-restart"]
+space.space.q = [":write-quit-all" ]
+
+
+# no ops
+
+"Y" = "no_op"
+"'" = "no_op"
+"a" = "no_op"
+"w" = "no_op"
+
+# go to implementation
+# file symbols s-0
+# workspace symbols .. s-p
+
+[editor]
+#clipboard-provider = "xclip"
+line-number = "relative"
+end-of-line-diagnostics = "hint" 
+#gutters = ["spacer", "diff","spacer"]
+gutters = ["line-numbers", "spacer"]
+idle-timeout = 1
+#bufferline = "multiple"
+
+[editor.inline-diagnostics] 
+cursor-line = "disable"
+other-lines = "disable"
+max-wrap = 10
+prefix-len = 1
+
+[editor.lsp]
+enable = true
+display-messages = true
+display-inlay-hints = false
+snippets = true
+
+
+[editor.soft-wrap]
+enable = true
+max-wrap = 100 # increase value to reduce forced mid-word wrapping
+max-indent-retain = 100
+wrap-indicator = ">> "  # set wrap-indicator to "" to hide it
+
+[editor.smart-tab]
+enable = true
+supersede-menu = true
+
+#[editor.auto-save]
+#after-delay.enable = true
+#after-delay.timeout = "400"
+
+[editor.file-picker]
+hidden = false
+
+[editor.cursor-shape]
+insert = "bar"
+normal = "block"
+select = "bar"
+
+[editor.search]
+smart-case = false
+
+[editor.statusline]
+left = ["spinner","file-modification-indicator", "file-name", "version-control"]
+center = []
+right = [ "selections",  "file-encoding", "file-line-ending","spacer" ]
+separator = "││"
+mode.normal = "NORMAL"
+mode.insert = "INSERT"
+mode.select = "SELECT"
