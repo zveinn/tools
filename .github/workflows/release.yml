@@ -59,6 +59,9 @@ jobs:
           # rejects newer zig versions. Bump only together with the crate.
           - { dir: xmux, lang: rust, zig: "0.15.2", extras: "xmux.service default-config.yaml" }
           - { dir: xssh, lang: rust, extras: "config.yaml.example policy.json" }
+          # Links libxkbcommon for keysym translation; the runners do not carry
+          # the dev package by default.
+          - { dir: xsw, lang: rust, apt: "libxkbcommon-dev", extras: "cosmic-shortcuts.ron.example config.yaml.example" }
         # Native runners for both architectures rather than cross-compiling:
         # xgit bundles SQLite and xmux builds Ghostty via zig, both of which are
         # far more trouble to cross-compile than a second runner is to rent.
@@ -96,6 +99,14 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.project.zig }}
+
+      # Only the projects that link a system library need this, so it stays
+      # off the critical path for the rest of the matrix.
+      - name: Install system packages
+        if: matrix.project.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.project.apt }}
 
       - name: Build (Go)
         if: matrix.project.lang == 'go'
