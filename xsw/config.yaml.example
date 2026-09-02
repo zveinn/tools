@@ -1,0 +1,125 @@
+# xsw configuration. Copy to ~/.config/xsw/config.yaml.
+#
+# Every key is optional. Anything left out follows COSMIC's own setting where
+# there is one (icon theme, interface font, dark/light) and the built-in
+# default otherwise, so an empty file behaves exactly like no file.
+#
+# Command line flags override this file. `xsw --dump-config` prints the values
+# actually in effect, and its output is itself a valid config file.
+#
+# A typo is reported on stderr and the whole file is then ignored, rather than
+# stopping the switcher from working. Run `xsw --dump-config` after editing to
+# see any complaint.
+
+# --- Size and placement ------------------------------------------------------
+
+# Width of the switcher, in logical pixels. It is always centered on the
+# active output; there is nothing to configure about the position.
+width: 360
+
+# How many rows are visible before the list scrolls. The switcher is only as
+# tall as the number of windows it actually shows.
+max_rows: 20
+
+# Which display the switcher appears on.
+#
+#   active   the display holding the focused window (the compositor picks)
+#   primary  the display COSMIC marks as primary, the same one Settings and
+#            `cosmic-randr list` call the Xwayland primary
+#   <name>   a specific output, e.g. "HDMI-A-1"; `cosmic-randr list` names them
+#
+# `primary` is the default. It is the only value that costs anything: it binds
+# the output-management protocols and waits for them, folded into the wait for
+# window state that happens anyway, so `active` is a shade quicker to appear.
+# An unreachable display falls back to the active one rather than the switcher
+# not appearing at all.
+display: primary
+
+# --- Appearance --------------------------------------------------------------
+
+# dark, light, or system to follow COSMIC's own setting (the default).
+theme: system
+
+# Font family. Defaults to COSMIC's interface font.
+#font: "Inter"
+
+# Icon theme to search first. Defaults to COSMIC's icon theme. hicolor and
+# Adwaita are always searched as fallbacks.
+#icon_theme: "Cosmic"
+
+# Show the window title on a second line under the application name. Set to
+# false for a compact, name-only list.
+show_titles: true
+
+layout:
+  row_height: 46          # must fit icon_size and the two lines of text
+  padding: 10             # around the whole panel
+  icon_gap: 10            # between the icon and the text column
+  icon_size: 30
+  corner_radius: 4.0      # of the panel
+  row_corner_radius: 4.0  # of the selected row's highlight
+  name_size: 14.5         # font size of the application name
+  title_size: 12.0        # font size of the window title
+
+# Colours are "#rrggbb" or "#rrggbbaa". Anything omitted keeps the palette
+# default for the active theme, so you can override just one.
+#colors:
+#  background: "#141418f2"
+#  selection: "#5a82dceb"
+#  name: "#eeeef2ff"
+#  title: "#96969eff"
+#  name_selected: "#ffffffff"
+#  title_selected: "#e2e8f8ff"
+
+# --- Behaviour ---------------------------------------------------------------
+
+# Order the list most-recently-used first, so the window you were just in is
+# at the top and the selection starts on the second row. Set to false to use
+# the compositor's announcement order instead, which is stable but arbitrary.
+mru: true
+
+# How long the modifier must stay held before the list is drawn, in
+# milliseconds. A quick flick of the binding releases well inside this window
+# and commits before the deadline arrives, so the switch happens with nothing
+# appearing on screen; only a deliberate hold outlasts it.
+#
+# Raise it if the list still flickers on a fast flick, lower it if it feels
+# slow to appear when you mean to hold. 0 draws immediately.
+debounce_ms: 250
+
+# Safety net: the longest the switcher may hold an exclusive keyboard grab
+# before closing itself. Only reached if the modifier release is never
+# reported and no key is pressed.
+max_lifetime_secs: 30
+
+# --- Title rules -------------------------------------------------------------
+#
+# Rewrites what is shown for windows whose title contains a substring. Mainly
+# for browser-hosted applications, which report the browser's app id and a
+# title like "Slack - MinioHQ - Slack - Chromium".
+#
+# Matching is case-insensitive by default and the first matching rule wins, so
+# put the specific ones first.
+#
+# Keys:
+#   contains        substring to look for in the window title  (required)
+#   title           title to show instead                      (required)
+#   name            application name to show instead of the desktop entry's
+#   icon            icon name to show instead of the application's; ignored if
+#                   it does not resolve in any installed theme, so a typo
+#                   leaves the real icon rather than a blank space
+#   app_id          only apply to windows with this exact app id
+#   case_sensitive  match `contains` exactly as written (default false)
+
+title_rules:
+  - contains: "Slack"
+    title: "Slack"
+    name: "Slack"
+
+  # Restricting by app_id keeps a rule from catching, say, a text editor that
+  # happens to have "Slack" in a file name.
+  #- contains: "Gmail"
+  #  title: "Gmail"
+  #  name: "Gmail"
+  #  app_id: "chromium"
+  #  icon: "gmail"

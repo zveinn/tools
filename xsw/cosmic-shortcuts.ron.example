@@ -1,0 +1,27 @@
+// Bindings that replace COSMIC's built-in window switcher with xsw.
+//
+// Copy into:
+//   ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom
+//
+// cosmic-comp picks the file up straight away; no logout is needed. If that
+// file already has entries, merge these in rather than overwriting it.
+//
+// COSMIC's shipped defaults bind all four of these combinations to
+// System(WindowSwitcher). A custom entry for the same combination takes
+// precedence, so listing them here is what disables the built-in switcher.
+// To go back, delete this file's contents (leaving `{}`) or remove the file.
+//
+// Use an absolute path: the command does not run through a login shell, so
+// ~/.local/bin is not necessarily on PATH. Replace /home/you accordingly.
+//
+// Every press runs xsw. The first one draws the list and holds the keyboard;
+// later ones hand their keystroke to it over a socket and exit immediately.
+// That indirection is required because cosmic-comp consumes a bound key
+// combination itself instead of delivering it to the focused surface, so the
+// running switcher never sees a second Tab.
+{
+    (modifiers: [Alt], key: "Tab"): Spawn("/home/you/.local/bin/xsw"),
+    (modifiers: [Alt, Shift], key: "Tab"): Spawn("/home/you/.local/bin/xsw --prev"),
+    (modifiers: [Super], key: "Tab"): Spawn("/home/you/.local/bin/xsw"),
+    (modifiers: [Super, Shift], key: "Tab"): Spawn("/home/you/.local/bin/xsw --prev"),
+}

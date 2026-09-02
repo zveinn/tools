@@ -1,0 +1,18 @@
+[package]
+name = "xsw"
+version = "0.1.0"
+edition = "2024"
+description = "Window switcher for the COSMIC desktop"
+
+[dependencies]
+cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] }
+cosmic-text = "0.19"
+freedesktop-icons = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = "0.48"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+smithay-client-toolkit = "0.21"
+tiny-skia = "0.12"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
