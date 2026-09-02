@@ -46,6 +46,11 @@ fn fit(s: &str, max: usize) -> String {
 /// Draw one frame of the viewed session: the active tab's panes at their
 /// rectangles, dim divider lines between them, the bottom tab bar, and
 /// the focused pane's cursor.
+///
+/// `full` repaints every cell instead of only the rows the panes marked
+/// dirty. The caller sets it when something outside the panes owns what
+/// is on the client's screen — an overlay that cleared it, a resize —
+/// because the panes' dirty state says nothing about that.
 pub fn draw_session(
     renderer: &mut Renderer<'static>,
     session: &Session,
@@ -54,9 +59,10 @@ pub fn draw_session(
     accent: Color,
     bar_top: bool,
     synchronized: bool,
+    full: bool,
 ) -> Result<()> {
     let content = content_size(size);
-    let full = Rect {
+    let area = Rect {
         x: 0,
         // With the bar on top, the pane area shifts down one row.
         y: u16::from(bar_top && size.1 >= 2),
@@ -69,23 +75,29 @@ pub fn draw_session(
     } else {
         queue!(out, Hide)?;
     }
+    // Wipe first on a full frame: the pane rects and the bar cover every
+    // cell, but this way nothing an overlay left behind can survive a
+    // gap. Inside the synchronized update, so it never shows.
+    if full {
+        queue!(out, SetAttribute(Attribute::Reset), Clear(ClearType::All))?;
+    }
 
     let mut cursor = None;
     let mut focus_rect = None;
     let focused = tab.focused;
     if tab.zoomed && let Some(pane) = tab.layout.pane(focused) {
         // Fullscreen: only the focused pane, no dividers.
-        cursor = renderer.draw_at(&pane.term, out, full)?;
+        cursor = renderer.draw_at(&pane.term, out, area, full)?;
     } else {
-        tab.layout.for_each(full, &mut |pane, rect| {
-            let pane_cursor = renderer.draw_at(&pane.term, out, rect)?;
+        tab.layout.for_each(area, &mut |pane, rect| {
+            let pane_cursor = renderer.draw_at(&pane.term, out, rect, full)?;
             if pane.id == focused {
                 cursor = pane_cursor;
                 focus_rect = Some(rect);
             }
             Ok(())
         })?;
-        draw_dividers(out, &tab.layout, full, focus_rect, accent)?;
+        draw_dividers(out, &tab.layout, area, focus_rect, accent)?;
     }
 
     if size.1 >= 2 {
@@ -643,11 +655,13 @@ impl<'alloc> Renderer<'alloc> {
     /// (the terminal is kept sized to the rect by `Tab::apply_layout`).
     /// Returns the coordinates of the terminal's cursor if visible.
     /// The caller wraps the frame in a synchronized update and flushes.
+    /// `full` paints every row regardless of the terminal's dirty state.
     fn draw_at(
         &mut self,
         term: &Terminal<'alloc, '_>,
         out: &mut impl Write,
         rect: Rect,
+        full: bool,
     ) -> Result<Option<(u16, u16)>> {
         // Snapshot the terminal state; everything below reads the snapshot.
         let snapshot = self.render_state.update(term)?;
@@ -671,7 +685,7 @@ impl<'alloc> Renderer<'alloc> {
             SetBackgroundColor(pen.bg),
         )?;
 
-        let frame_dirty = snapshot.dirty()?;
+        let frame_dirty = if full { Dirty::Full } else { snapshot.dirty()? };
         if frame_dirty != Dirty::Clean {
             let mut row_it = self.row_it.update(&snapshot)?;
             let mut y: u16 = 0;
@@ -799,5 +813,38 @@ fn color(rgb: RgbColor) -> Color {
         r: rgb.r,
         g: rgb.g,
         b: rgb.b,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libghostty_vt::TerminalOptions;
+
+    /// A pane that produced no output since the last frame reports
+    /// nothing dirty, so an ordinary frame paints nothing at all. That is
+    /// what left the manager's panel on screen after Esc: the overlay
+    /// cleared the client's screen, and the frame that was supposed to
+    /// restore the panes was a no-op. A full frame must paint anyway.
+    #[test]
+    fn a_full_frame_repaints_an_idle_terminal() {
+        let mut term = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 3,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        term.vt_write(b"hello");
+        let mut renderer = Renderer::new().unwrap();
+        let rect = Rect { x: 0, y: 0, w: 20, h: 3 };
+        let mut paint = |full: bool| {
+            let mut buf = Vec::new();
+            renderer.draw_at(&term, &mut buf, rect, full).unwrap();
+            String::from_utf8_lossy(&buf).contains("hello")
+        };
+
+        assert!(paint(false), "first frame paints the pane");
+        assert!(!paint(false), "idle pane stays unpainted");
+        assert!(paint(true), "a full frame repaints it");
     }
 }

@@ -54,6 +54,11 @@ struct ClientConn {
     /// Mouse select-to-copy state.
     select: SelectState,
     needs_redraw: bool,
+    /// The client's screen holds something the panes' dirty tracking
+    /// knows nothing about — an overlay that cleared it, a resize, a
+    /// fresh attach — so the next running-mode frame must repaint every
+    /// cell instead of only the rows the panes marked dirty.
+    needs_full: bool,
     /// Latest OSC 52 text to send after the next redraw (last write wins).
     pending_copy: Option<String>,
     /// Set when the last input was pointer-only, so the running-mode
@@ -76,6 +81,7 @@ impl ClientConn {
             mode: Mode::Running,
             select: SelectState::default(),
             needs_redraw: false,
+            needs_full: true,
             pending_copy: None,
             skip_sync: false,
             closing: false,
@@ -225,6 +231,9 @@ pub fn run() -> Result<()> {
                         for client in clients.iter_mut() {
                             if client.attached.is_some() && !client.closing && !client.dead {
                                 client.needs_redraw = true;
+                                // `bar-top` moves the whole pane area a
+                                // row, so nothing on screen can be reused.
+                                client.needs_full = true;
                             }
                         }
                         eprintln!("config reloaded");
@@ -437,6 +446,8 @@ pub fn run() -> Result<()> {
                 let Some(id) = client.attached else { continue };
                 if sessions.iter().any(|s| s.id == id) {
                     client.needs_redraw = true;
+                    // A pane died: the survivors move into its space.
+                    client.needs_full = true;
                     continue;
                 }
                 // Viewed session is gone: fall back to any surviving
@@ -446,6 +457,7 @@ pub fn run() -> Result<()> {
                         client.attached = Some(first.id);
                         client.mode = Mode::Running;
                         client.needs_redraw = true;
+                        client.needs_full = true;
                     }
                     None => client.bye("session closed"),
                 }
@@ -497,6 +509,14 @@ pub fn run() -> Result<()> {
             };
             let size = clients[ci].size;
             let skip_sync = clients[ci].skip_sync;
+            // Every overlay below opens by clearing the whole screen, so
+            // any frame that is not a session frame leaves the client
+            // owing a full repaint. Set here rather than at each Esc: it
+            // covers every way out of an overlay (Esc, q, the toggle
+            // chord, a switch, a kill) and every overlay that ever gets
+            // added.
+            let full = clients[ci].needs_full;
+            clients[ci].needs_full = !matches!(clients[ci].mode, Mode::Running);
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             match &clients[ci].mode {
                 Mode::Running => {
@@ -507,7 +527,11 @@ pub fn run() -> Result<()> {
                         size,
                         config.accent,
                         config.bar_top,
-                        !skip_sync,
+                        // A full frame wipes the screen before painting,
+                        // so it has to be atomic even when a pointer-only
+                        // repaint would otherwise skip the sync.
+                        !skip_sync || full,
+                        full,
                     )?;
                 }
                 Mode::Manager {
@@ -823,6 +847,7 @@ fn handle_frame(
                 sessions[si].resize(content_size((cols, rows)))?;
             }
             clients[ci].needs_redraw = true;
+            clients[ci].needs_full = true;
             clients[ci].skip_sync = false;
         }
         _ => {
@@ -982,6 +1007,7 @@ fn rehome_homeless_clients(
         clients[ci].attached = Some(sessions[0].id);
         clients[ci].mode = Mode::Running;
         clients[ci].needs_redraw = true;
+        clients[ci].needs_full = true;
         sessions[0].resize(content_size(clients[ci].size))?;
     }
     Ok(())
@@ -1004,5 +1030,6 @@ fn attach_to(
     clients[ci].attached = Some(id);
     sessions[si].resize(content_size(clients[ci].size))?;
     clients[ci].needs_redraw = true;
+    clients[ci].needs_full = true;
     Ok(())
 }
