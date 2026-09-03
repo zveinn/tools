@@ -112,6 +112,7 @@ directory documents all of them; the interesting ones:
 width: 360              # centered on the active output
 max_rows: 20            # rows before the list scrolls
 display: primary        # active | primary | an output name like HDMI-A-1
+windows: all            # all, or primary to list only that display's windows
 theme: system           # dark | light | system (COSMIC's own setting)
 show_titles: true       # false gives a compact, name-only list
 mru: true               # most-recently-used ordering
@@ -182,6 +183,39 @@ found — unplugged, renamed, or a compositor that reports no primary — xsw sa
 so on stderr and falls back to the active display, since appearing in the wrong
 place beats not appearing.
 
+### Listing only one display's windows
+
+`windows: primary` drops everything that does not belong to the primary
+display. It is a separate axis from `display`, which only decides where the
+switcher is drawn.
+
+```yaml
+display: primary   # draw it on the primary display
+windows: primary   # and only list windows that live there
+```
+
+"Belonging to" is doing real work in that sentence. The protocol describes
+`output_enter` on a toplevel as the window becoming *visible* on an output,
+which would have made this a visibility filter — and since COSMIC workspaces
+are per-display, that would have made windows on the primary's other
+workspaces unreachable. Testing cosmic-comp directly showed otherwise: a
+window keeps its output both when minimized and when parked on an inactive
+workspace of that display. So `primary` means everything that lives on that
+display, and activating one of those windows switches workspace as usual.
+
+Two consequences worth knowing:
+
+- Windows on your **other** displays become unreachable from the switcher.
+  Bind a second key to `xsw --windows all` if you want an escape hatch.
+- If the primary has no windows, or is unplugged, or the compositor reports no
+  primary, xsw says so on stderr and lists everything instead. A keybinding
+  that silently does nothing reads as broken; too many windows is the milder
+  failure.
+
+Focus history is recorded before the filter runs, so focusing a window on
+another display is still remembered and most-recently-used ordering does not
+drift when the filter is on.
+
 ### Title rules
 
 Rewrites what is shown for windows whose title contains a substring. Mainly for
@@ -234,6 +268,7 @@ than a blank space.
       --width <px>       width of the switcher
       --max-rows <n>     rows shown before scrolling
       --display <d>      active, primary, or an output name like HDMI-A-1
+      --windows <w>      all, or primary to list only the primary display's
       --icon-theme <s>   icon theme to search
       --font <family>    font family
       --dark, --light    force a palette

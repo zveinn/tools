@@ -252,21 +252,39 @@ impl App {
         found
     }
 
-    /// Puts the windows in most-recently-used order and picks the first
-    /// selection.
-    fn order_windows(&mut self) {
-        // Whatever the compositor says is focused is by definition the most
-        // recent. It is the authority rather than our own history, because
-        // focus also changes by clicking a window, which never goes through
-        // xsw and so leaves no trace in the history.
-        if let Some(active) = self.windows.iter().find(|w| w.activated) {
+    /// Records the focused window in the history.
+    ///
+    /// Takes the *unfiltered* list and runs before any display filtering, so
+    /// that focusing a window on another display is still remembered.
+    /// Filtering first would quietly stop the history tracking anything
+    /// outside the filter, degrading the ordering over time.
+    ///
+    /// Whatever the compositor says is focused is the authority here rather
+    /// than our own history, because focus also changes by clicking a window,
+    /// which never goes through xsw and so leaves no trace.
+    pub fn note_focus(&mut self, windows: &[Window]) {
+        if let Some(active) = windows.iter().find(|w| w.activated) {
             let identifier = active.identifier.clone();
             self.mru.promote(&identifier);
         }
-        // Written now rather than only on commit, so that a cancelled run
-        // still leaves the history reflecting reality.
+        // Saved now rather than only on commit, so a cancelled run still
+        // leaves the history reflecting reality.
         self.mru.save();
+    }
 
+    /// The output with this name, if it is currently connected.
+    pub fn output_by_name(&self, wanted: &str) -> Option<wl_output::WlOutput> {
+        self.output_state.outputs().find(|output| {
+            self.output_state
+                .info(output)
+                .and_then(|info| info.name)
+                .is_some_and(|name| name == wanted)
+        })
+    }
+
+    /// Puts the windows in most-recently-used order and picks the first
+    /// selection.
+    fn order_windows(&mut self) {
         if self.config.mru {
             self.mru.sort(&mut self.windows, |window| window.identifier.as_str());
         }

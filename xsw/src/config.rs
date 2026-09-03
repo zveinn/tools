@@ -45,6 +45,8 @@ pub struct Config {
     pub max_rows: usize,
     /// Which display the switcher appears on.
     pub display: Display,
+    /// Which windows the switcher lists.
+    pub windows: WindowFilter,
     /// Order the list most-recently-used first.
     pub mru: bool,
     /// How long a modifier must stay held before the list is drawn.
@@ -226,6 +228,58 @@ impl<'de> Deserialize<'de> for Display {
     }
 }
 
+/// Which windows the switcher lists.
+///
+/// A separate axis from [`Display`]: that one decides where the switcher
+/// appears, this one decides what goes in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowFilter {
+    /// Every window, on every display and workspace.
+    #[default]
+    All,
+    /// Only windows belonging to the primary display.
+    ///
+    /// "Belonging to" rather than "visible on": a window keeps its output
+    /// while minimized or parked on one of that display's other workspaces,
+    /// both of which were confirmed against cosmic-comp, so those stay
+    /// reachable.
+    Primary,
+}
+
+impl std::str::FromStr for WindowFilter {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim() {
+            "all" => Ok(Self::All),
+            "primary" | "main" => Ok(Self::Primary),
+            other => Err(format!("windows must be \"all\" or \"primary\", got {other:?}")),
+        }
+    }
+}
+
+impl std::fmt::Display for WindowFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::All => "all",
+            Self::Primary => "primary",
+        })
+    }
+}
+
+impl Serialize for WindowFilter {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for WindowFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// A colour written as `#rrggbb` or `#rrggbbaa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba {
@@ -346,6 +400,7 @@ struct FileConfig {
     width: Option<u32>,
     max_rows: Option<usize>,
     display: Option<Display>,
+    windows: Option<WindowFilter>,
     theme: Option<Theme>,
     font: Option<String>,
     icon_theme: Option<String>,
@@ -387,6 +442,7 @@ impl Default for Config {
             width: 360,
             max_rows: 20,
             display: Display::Primary,
+            windows: WindowFilter::All,
             mru: true,
             debounce: Duration::from_millis(250),
             show_titles: true,
@@ -499,6 +555,9 @@ impl Config {
         if let Some(display) = file.display {
             self.display = display;
         }
+        if let Some(windows) = file.windows {
+            self.windows = windows;
+        }
         if let Some(font) = file.font {
             self.font_family = Some(font);
         }
@@ -546,6 +605,9 @@ impl Config {
         }
         if let Some(display) = &flags.display {
             self.display = display.clone();
+        }
+        if let Some(windows) = flags.windows {
+            self.windows = windows;
         }
         if let Some(dark) = flags.dark {
             *theme = Some(if dark { Theme::Dark } else { Theme::Light });
@@ -655,6 +717,7 @@ struct Flags {
     font: Option<String>,
     icon_theme: Option<String>,
     dark: Option<bool>,
+    windows: Option<WindowFilter>,
     reverse: bool,
 }
 
@@ -677,6 +740,10 @@ impl Flags {
                 "--dark" => flags.dark = Some(true),
                 "--width" => flags.width = Some(parse_next(&mut args, "--width")?),
                 "--max-rows" => flags.max_rows = Some(parse_next(&mut args, "--max-rows")?),
+                "--windows" => {
+                    let raw = args.next().ok_or_else(|| "--windows needs a value".to_string())?;
+                    flags.windows = Some(raw.parse()?);
+                }
                 "--display" => {
                     let raw = args.next().ok_or_else(|| "--display needs a value".to_string())?;
                     flags.display = Some(raw.parse()?);
@@ -766,6 +833,7 @@ Options:
       --width <px>       width of the switcher
       --max-rows <n>     rows shown before scrolling
       --display <d>      active, primary, or an output name like HDMI-A-1
+      --windows <w>      all, or primary to list only the primary display's
       --icon-theme <s>   icon theme to search
       --font <family>    font family
       --dark, --light    force a palette
@@ -863,6 +931,30 @@ mod tests {
         assert!(from_yaml("layout:\n  row_height: 20").is_err());
         // A huge icon leaves no width for the text column.
         assert!(from_yaml("layout:\n  icon_size: 600\n  row_height: 620").is_err());
+    }
+
+    #[test]
+    fn window_filter_parses_and_defaults_to_all() {
+        assert_eq!(Config::default().windows, WindowFilter::All);
+        assert_eq!(WindowFilter::default(), Config::default().windows, "enum and config agree");
+        assert_eq!(from_yaml("windows: all").unwrap().windows, WindowFilter::All);
+        assert_eq!(from_yaml("windows: primary").unwrap().windows, WindowFilter::Primary);
+        assert_eq!(from_yaml("windows: main").unwrap().windows, WindowFilter::Primary);
+    }
+
+    #[test]
+    fn window_filter_rejects_anything_else() {
+        // Unlike `display`, a stray value here cannot be an output name, so
+        // there is nothing sensible to fall through to.
+        assert!(from_yaml("windows: HDMI-A-1").is_err());
+        assert!(from_yaml("windows: \"\"").is_err());
+    }
+
+    #[test]
+    fn window_filter_round_trips_through_the_dump() {
+        let config = Config { windows: WindowFilter::Primary, ..Config::default() };
+        let reparsed: FileConfig = serde_yaml::from_str(&config.to_yaml()).unwrap();
+        assert_eq!(reparsed.windows, Some(WindowFilter::Primary));
     }
 
     #[test]

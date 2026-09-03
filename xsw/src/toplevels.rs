@@ -22,6 +22,7 @@ use cosmic_protocols::toplevel_management::v1::client::zcosmic_toplevel_manager_
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::foreign_toplevel_list::ForeignToplevelList;
 use wayland_client::globals::{BindError, GlobalList};
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
@@ -61,6 +62,9 @@ pub struct CosmicToplevelData {
 struct CosmicToplevelState {
     activated: bool,
     minimized: bool,
+    /// Outputs this window belongs to. Usually exactly one, but the protocol
+    /// allows a window to span several.
+    outputs: Vec<WlOutput>,
 }
 
 impl CosmicToplevelData {
@@ -72,6 +76,11 @@ impl CosmicToplevelData {
     /// Whether the window is minimized, which we label in the list.
     pub fn minimized(&self) -> bool {
         self.state.lock().unwrap().minimized
+    }
+
+    /// The outputs this window belongs to.
+    pub fn outputs(&self) -> Vec<WlOutput> {
+        self.state.lock().unwrap().outputs.clone()
     }
 }
 
@@ -178,6 +187,8 @@ impl CosmicToplevels {
 #[derive(Debug, Clone)]
 pub struct Window {
     pub foreign: ExtForeignToplevelHandleV1,
+    /// Outputs this window belongs to, for the `windows: primary` filter.
+    pub outputs: Vec<WlOutput>,
     /// Opaque per-toplevel id from the protocol, stable for the window's
     /// lifetime and across connections. This is what the MRU history keys on.
     pub identifier: String,
@@ -201,6 +212,7 @@ pub fn snapshot(foreign: &ForeignToplevelList, cosmic: &CosmicToplevels) -> Vec<
             let state = cosmic.state(handle);
             Some(Window {
                 foreign: handle.clone(),
+                outputs: state.as_ref().map(CosmicToplevelData::outputs).unwrap_or_default(),
                 identifier: info.identifier,
                 app_id: info.app_id,
                 title: info.title,
@@ -249,6 +261,30 @@ where
         _conn: &Connection,
         _qh: &QueueHandle<D>,
     ) {
+        // The protocol describes `output_enter` as the toplevel becoming
+        // "visible" on an output, but cosmic-comp keeps the association while a
+        // window is minimized or parked on another of that output's
+        // workspaces — both verified against it. So this really means
+        // "belongs to", which is what makes filtering by display useful:
+        // windows elsewhere on the same display stay reachable.
+        match &event {
+            zcosmic_toplevel_handle_v1::Event::OutputEnter { output } => {
+                let mut inner = self.state.lock().unwrap();
+                if !inner.outputs.contains(output) {
+                    inner.outputs.push(output.clone());
+                }
+                drop(inner);
+                self.dirty.store(true, Ordering::Relaxed);
+                return;
+            }
+            zcosmic_toplevel_handle_v1::Event::OutputLeave { output } => {
+                self.state.lock().unwrap().outputs.retain(|o| o != output);
+                self.dirty.store(true, Ordering::Relaxed);
+                return;
+            }
+            _ => {}
+        }
+
         if let zcosmic_toplevel_handle_v1::Event::State { state } = event {
             // The array is a packed list of u32 enum values in host byte order;
             // a state not present in the array is off.

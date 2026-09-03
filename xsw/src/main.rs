@@ -26,7 +26,7 @@ use smithay_client_toolkit::shm::Shm;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::{Connection, EventQueue};
 
-use config::{Config, Display, Mode};
+use config::{Config, Display, Mode, WindowFilter};
 use ipc::{Role, Step};
 use outputs::PrimaryFinder;
 use toplevels::CosmicToplevels;
@@ -116,8 +116,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bound only when the primary display is actually wanted, so the default
     // costs no globals, no events and no extra roundtrip.
-    let primary_finder = match config.display {
-        Display::Primary => {
+    let needs_primary =
+        config.display == Display::Primary || config.windows == WindowFilter::Primary;
+    let primary_finder = if needs_primary {
+        {
             let finder = PrimaryFinder::bind(&globals, &qh);
             if !finder.is_available() {
                 eprintln!(
@@ -127,10 +129,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Some(finder)
         }
-        Display::Active | Display::Named(_) => None,
+    } else {
+        None
     };
 
     let max_lifetime = config.max_lifetime;
+    let config_windows = config.windows;
     let mut app = App::new(&globals, &qh, shm, foreign, cosmic, config)?;
 
     // Drain the toplevel announcements. The window list is delivered in reply
@@ -140,6 +144,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     queue.roundtrip(&mut app)?;
     let windows = wait_for_state(&mut queue, &mut app, primary_finder.as_ref())?;
     let primary_name = primary_finder.as_ref().and_then(PrimaryFinder::primary_name);
+
+    // Recorded before filtering, so focus on a display the filter excludes is
+    // still remembered; see App::note_focus.
+    app.note_focus(&windows);
+    let windows = restrict(windows, &app, config_windows, primary_name.as_deref());
 
     if mode == Mode::List {
         for window in &windows {
@@ -223,6 +232,42 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     app.finish(&conn);
     Ok(())
+}
+
+/// Drops windows that do not belong to the wanted display.
+///
+/// Falls back to the full list whenever the filter cannot be applied or would
+/// empty the list: a keybinding that silently does nothing reads as broken,
+/// and showing more windows than asked for is the milder failure.
+fn restrict(
+    windows: Vec<toplevels::Window>,
+    app: &App,
+    filter: WindowFilter,
+    primary_name: Option<&str>,
+) -> Vec<toplevels::Window> {
+    if filter == WindowFilter::All || windows.is_empty() {
+        return windows;
+    }
+
+    let Some(name) = primary_name else {
+        eprintln!("xsw: no primary display reported; listing every window");
+        return windows;
+    };
+    let Some(output) = app.output_by_name(name) else {
+        eprintln!("xsw: primary display {name:?} is not connected; listing every window");
+        return windows;
+    };
+
+    // `contains` rather than equality: the protocol allows a window to span
+    // more than one output, and one straddling the primary still counts.
+    let kept: Vec<_> =
+        windows.iter().filter(|w| w.outputs.contains(&output)).cloned().collect();
+
+    if kept.is_empty() {
+        eprintln!("xsw: no windows on {name:?}; listing every window");
+        return windows;
+    }
+    kept
 }
 
 /// Waits for per-window state to arrive, returning the list either way.

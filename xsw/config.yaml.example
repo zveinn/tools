@@ -35,6 +35,21 @@ max_rows: 20
 # not appearing at all.
 display: primary
 
+# Which windows the switcher lists.
+#
+#   all      every window, on every display and workspace
+#   primary  only windows belonging to the primary display (see `display`)
+#
+# "Belonging to" rather than "visible on": a window keeps its display while
+# minimized or parked on one of that display's other workspaces, so those stay
+# reachable and activating one switches workspace as usual.
+#
+# With `primary`, windows on your other displays are not reachable from the
+# switcher at all. If that is too strict, bind a second key to `xsw --windows
+# all` as an escape hatch. If the primary has no windows, or is unplugged, the
+# full list is shown rather than nothing.
+windows: all
+
 # --- Appearance --------------------------------------------------------------
 
 # dark, light, or system to follow COSMIC's own setting (the default).
