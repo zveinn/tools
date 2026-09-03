@@ -59,15 +59,19 @@ the previously used window with nothing drawn on screen at all, so flicking
 repeatedly toggles between your two most recent windows the way Alt-Tab is
 expected to.
 
-Hold the binding down instead and the list appears, after `debounce_ms` (250 by
-default). Nothing is painted until either the modifier has been held that long
-or it is released, which is what keeps a flick silent in both the cases that
-arise: the modifier is often already released by the time xsw has keyboard
-focus, and when it is not, the release still beats the paint deadline. Raise
-`debounce_ms` if you ever see the list flicker up before committing, lower it
-if it feels slow to appear when you mean to hold, or set `0` to draw
-immediately. Cycling works throughout either way — presses move the selection,
-they are just not drawn yet.
+Hold the binding down instead and the list appears. Nothing is painted until
+either a held modifier is reported or the modifier is released, which is what
+keeps a flick silent: by the time xsw has keyboard focus the modifier is
+usually already released, so it commits without ever putting a surface on
+screen.
+
+`debounce_ms` covers the remaining case, where the modifier is *still* down at
+that moment and the list would flash up for a few frames before committing. It
+is `0` by default, meaning draw as soon as a held modifier is reported; set it
+to a few hundred milliseconds if you see that flash, at the cost of a
+deliberate hold waiting that long before the list appears. Cycling works
+throughout either way — presses move the selection, they are just not drawn
+yet.
 
 Each further press moves the selection one row; releasing the modifier focuses
 the highlighted window.
@@ -116,7 +120,7 @@ windows: all            # all, or primary to list only that display's windows
 theme: system           # dark | light | system (COSMIC's own setting)
 show_titles: true       # false gives a compact, name-only list
 mru: true               # most-recently-used ordering
-debounce_ms: 250        # hold this long before the list is drawn
+debounce_ms: 0          # hold this long before the list is drawn
 max_lifetime_secs: 30   # safety cap on the keyboard grab
 
 layout:                 # all logical pixels, scaled by the output factor

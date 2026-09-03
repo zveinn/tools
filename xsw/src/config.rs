@@ -51,9 +51,12 @@ pub struct Config {
     pub mru: bool,
     /// How long a modifier must stay held before the list is drawn.
     ///
-    /// A flick of the binding releases well inside this window, so the switch
-    /// happens with nothing ever appearing on screen. Only a deliberate hold
-    /// outlasts it and shows the list.
+    /// Zero by default, so the list appears as soon as a held modifier is
+    /// reported. A flick is still silent in the common case, because the
+    /// modifier is usually already released by the time the switcher has
+    /// keyboard focus and it then commits without painting. Raising this
+    /// covers the remaining case, where the modifier is still down at that
+    /// moment and the list would otherwise flash up before committing.
     #[serde(serialize_with = "serialize_millis", rename = "debounce_ms")]
     pub debounce: Duration,
     /// Show the window title under the application name.
@@ -444,7 +447,7 @@ impl Default for Config {
             display: Display::Primary,
             windows: WindowFilter::All,
             mru: true,
-            debounce: Duration::from_millis(250),
+            debounce: Duration::ZERO,
             show_titles: true,
             max_lifetime: Duration::from_secs(30),
             layout: Layout::default(),
@@ -991,7 +994,7 @@ mod tests {
 
     #[test]
     fn debounce_defaults_and_overrides() {
-        assert_eq!(Config::default().debounce, Duration::from_millis(250));
+        assert_eq!(Config::default().debounce, Duration::ZERO);
         assert_eq!(from_yaml("debounce_ms: 0").unwrap().debounce, Duration::ZERO);
         assert_eq!(
             from_yaml("debounce_ms: 250").unwrap().debounce,

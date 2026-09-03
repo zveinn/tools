@@ -94,13 +94,15 @@ layout:
 mru: true
 
 # How long the modifier must stay held before the list is drawn, in
-# milliseconds. A quick flick of the binding releases well inside this window
-# and commits before the deadline arrives, so the switch happens with nothing
-# appearing on screen; only a deliberate hold outlasts it.
+# milliseconds. 0, the default, draws as soon as a held modifier is reported.
 #
-# Raise it if the list still flickers on a fast flick, lower it if it feels
-# slow to appear when you mean to hold. 0 draws immediately.
-debounce_ms: 250
+# A flick is silent even at 0 in the common case: the modifier is usually
+# already released by the time the switcher has keyboard focus, and it then
+# commits without painting anything. Raise this only if a fast flick makes the
+# list flash up before it commits, which happens when the modifier is still
+# down at that moment. A few hundred milliseconds is plenty; the cost is that
+# a deliberate hold waits that long before showing the list.
+debounce_ms: 0
 
 # Safety net: the longest the switcher may hold an exclusive keyboard grab
 # before closing itself. Only reached if the modifier release is never
