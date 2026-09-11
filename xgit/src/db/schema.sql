@@ -116,3 +116,35 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notif_updated ON notifications(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notif_unread  ON notifications(unread);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    github_id  INTEGER PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    name       TEXT,
+    title      TEXT,
+    status     TEXT,
+    conclusion TEXT,
+    event      TEXT,
+    branch     TEXT,
+    run_number INTEGER,
+    actor      TEXT,
+    html_url   TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_repo ON workflow_runs(owner, repo, created_at DESC);
+
+-- Repositories the authenticated user owns, with GitHub's own open counts.
+-- Refreshed wholesale from the API; unrelated to the `repos` table, which
+-- only holds repos an issue or PR was cached for.
+CREATE TABLE IF NOT EXISTS owned_repos (
+    owner       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    open_prs    INTEGER NOT NULL DEFAULT 0,
+    bot_prs     INTEGER NOT NULL DEFAULT 0,
+    open_issues INTEGER NOT NULL DEFAULT 0,
+    pushed_at   TEXT,
+    PRIMARY KEY (owner, name)
+);

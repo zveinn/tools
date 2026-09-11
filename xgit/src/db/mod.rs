@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::model::{
     Comment, HydratedItem, InboxRow, IssueLink, ItemDetail, ItemQuery, ItemRow, ItemState, Kind,
-    Label, LinkKind, Review, Role, StateFilter, View, review_progress,
+    Label, LinkKind, RepoRow, Review, Role, RunRow, StateFilter, View, review_progress,
 };
 use crate::timeutil::now_rfc3339;
 
@@ -504,13 +504,19 @@ impl Db {
             );
             let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-            apply_view_filter(&mut sql, q.view);
+            apply_view_filter(&mut sql, q);
             apply_state_filter(&mut sql, q);
             apply_time_filter(&mut sql, q, &mut args);
             apply_repo_filter(&mut sql, q, &mut args);
+            apply_scope_filter(&mut sql, q, &mut args);
             apply_search_filter(&mut sql, q, &mut args);
 
-            sql.push_str(" ORDER BY i.updated_at DESC");
+            if q.is_scoped() {
+                // One repo's whole history: open work first, then newest.
+                sql.push_str(" ORDER BY (i.state = 'open') DESC, i.updated_at DESC");
+            } else {
+                sql.push_str(" ORDER BY i.updated_at DESC");
+            }
 
             let mut stmt = c.prepare(&sql)?;
             let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -576,10 +582,11 @@ impl Db {
                 "SELECT COUNT(*) FROM items i JOIN repos r ON r.id = i.repo_id WHERE 1=1",
             );
             let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            apply_view_filter(&mut sql, q.view);
+            apply_view_filter(&mut sql, q);
             apply_state_filter(&mut sql, q);
             apply_time_filter(&mut sql, q, &mut args);
             apply_repo_filter(&mut sql, q, &mut args);
+            apply_scope_filter(&mut sql, q, &mut args);
             apply_search_filter(&mut sql, q, &mut args);
             let mut stmt = c.prepare(&sql)?;
             let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -598,14 +605,189 @@ impl Db {
                 ));
                 continue;
             }
+            if view == View::SeenRepos {
+                out.push((view, self.count_repos(base)?));
+                continue;
+            }
+            if view == View::MyRepos {
+                out.push((view, self.count_owned_repos(base)?));
+                continue;
+            }
             let mut q = base.clone();
             q.view = view;
+            q.scope_repo = None;
+            q.scope_kind = None;
             if !view.uses_state_filter() {
                 q.state = StateFilter::All;
             }
             out.push((view, self.count(&q)?));
         }
         Ok(out)
+    }
+
+    /// Repositories with cached items, most open PRs first.
+    ///
+    /// Counts cover what xgit has synced — the issues and PRs you are involved
+    /// in — not every open PR on GitHub.
+    pub fn list_repos(&self, q: &ItemQuery) -> Result<Vec<RepoRow>> {
+        self.with(|c| {
+            let (sql, args) = repo_list_sql(q, false);
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), repo_row_from)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn count_repos(&self, q: &ItemQuery) -> Result<usize> {
+        self.with(|c| {
+            let (inner, args) = repo_list_sql(q, true);
+            let sql = format!("SELECT COUNT(*) FROM ({inner})");
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let n: i64 = stmt.query_row(refs.as_slice(), |r| r.get(0))?;
+            Ok(n as usize)
+        })
+    }
+
+    /// The last fetched list of repositories the user owns, most open PRs
+    /// first. `open_prs` / `open_issues` are GitHub's repo-wide totals;
+    /// `unread` still comes from the local cache.
+    pub fn list_owned_repos(&self, q: &ItemQuery) -> Result<Vec<RepoRow>> {
+        self.with(|c| {
+            let (sql, args) = owned_repo_list_sql(q, false);
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), repo_row_from)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn count_owned_repos(&self, q: &ItemQuery) -> Result<usize> {
+        self.with(|c| {
+            let (inner, args) = owned_repo_list_sql(q, true);
+            let sql = format!("SELECT COUNT(*) FROM ({inner})");
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let n: i64 = stmt.query_row(refs.as_slice(), |r| r.get(0))?;
+            Ok(n as usize)
+        })
+    }
+
+    /// Wholesale replace: the fetch always returns the complete owned list,
+    /// so repos the user deleted or transferred disappear here too.
+    pub fn replace_owned_repos(&self, repos: &[RepoRow]) -> Result<()> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            tx.execute("DELETE FROM owned_repos", [])?;
+            for repo in repos {
+                tx.execute(
+                    "INSERT OR REPLACE INTO owned_repos(
+                        owner, name, open_prs, bot_prs, open_issues, pushed_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        repo.owner,
+                        repo.name,
+                        repo.open_prs as i64,
+                        repo.bot_prs as i64,
+                        repo.open_issues as i64,
+                        repo.updated_at,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn replace_workflow_runs(&self, owner: &str, repo: &str, runs: &[RunRow]) -> Result<()> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM workflow_runs WHERE owner = ?1 AND repo = ?2",
+                params![owner, repo],
+            )?;
+            for run in runs {
+                tx.execute(
+                    "INSERT OR REPLACE INTO workflow_runs(
+                        github_id, owner, repo, name, title, status, conclusion, event,
+                        branch, run_number, actor, html_url, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![
+                        run.github_id,
+                        owner,
+                        repo,
+                        run.name,
+                        run.title,
+                        run.status,
+                        run.conclusion,
+                        run.event,
+                        run.branch,
+                        run.run_number,
+                        run.actor,
+                        run.html_url,
+                        run.created_at,
+                        run.updated_at,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn count_workflow_runs(&self, owner: &str, repo: &str) -> Result<usize> {
+        self.with(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM workflow_runs WHERE owner = ?1 AND repo = ?2",
+                params![owner, repo],
+                |r| r.get(0),
+            )?;
+            Ok(n as usize)
+        })
+    }
+
+    pub fn list_workflow_runs(&self, owner: &str, repo: &str) -> Result<Vec<RunRow>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT github_id, owner, repo, name, title, status, conclusion, event,
+                        branch, run_number, actor, html_url, created_at, updated_at
+                 FROM workflow_runs
+                 WHERE owner = ?1 AND repo = ?2
+                 ORDER BY created_at DESC, run_number DESC",
+            )?;
+            let rows = stmt.query_map(params![owner, repo], |r| {
+                Ok(RunRow {
+                    github_id: r.get(0)?,
+                    owner: r.get(1)?,
+                    repo: r.get(2)?,
+                    name: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    status: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    conclusion: r.get(6)?,
+                    event: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    branch: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    run_number: r.get::<_, Option<i64>>(9)?.unwrap_or(0),
+                    actor: r.get(10)?,
+                    html_url: r.get(11)?,
+                    created_at: r.get(12)?,
+                    updated_at: r.get(13)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
     }
 
     pub fn get_detail(&self, id: i64) -> Result<Option<ItemDetail>> {
@@ -845,7 +1027,25 @@ pub struct DbStats {
     pub comments: i64,
 }
 
+/// `CREATE TABLE IF NOT EXISTS` cannot add a column to a table an older xgit
+/// already created, so widen it here instead of gating on schema_version
+/// (a fresh database already has the column and must not be altered).
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(());
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "owned_repos", "bot_prs", "INTEGER NOT NULL DEFAULT 0")?;
     let version = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -1163,9 +1363,121 @@ fn apply_inbox_search(
     args.push(Box::new(pat));
 }
 
-fn apply_view_filter(sql: &mut String, view: View) {
-    match view {
-        View::Inbox => sql.push_str(" AND 0"),
+/// Human PRs first, then Dependabot's, then real issues: a repo buried in
+/// dependency bumps should not outrank one with work waiting.
+const REPO_ORDER: &str = " ORDER BY open_prs DESC, open_issues DESC, bot_prs DESC, unread DESC";
+
+/// Aggregate of the cached items per repository. `keys_only` trims the
+/// projection down to what `COUNT(*)` needs.
+fn repo_list_sql(q: &ItemQuery, keys_only: bool) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let bot = dependabot_sql("i.author");
+    let projection = if keys_only {
+        "r.id".to_string()
+    } else {
+        format!(
+            "r.owner, r.name,
+         SUM(CASE WHEN i.kind = 'pr' AND i.state = 'open' AND NOT {bot} THEN 1 ELSE 0 END) AS open_prs,
+         SUM(CASE WHEN i.kind = 'pr' AND i.state = 'open' AND {bot} THEN 1 ELSE 0 END)     AS bot_prs,
+         SUM(CASE WHEN i.kind = 'issue' AND i.state = 'open' THEN 1 ELSE 0 END)            AS open_issues,
+         SUM(CASE WHEN i.unread = 1 THEN 1 ELSE 0 END)                                     AS unread,
+         MAX(i.updated_at)                                                                 AS updated_at"
+        )
+    };
+    let mut sql = format!(
+        "SELECT {projection}
+         FROM repos r JOIN items i ON i.repo_id = r.id
+         WHERE 1=1"
+    );
+    apply_repo_filter(&mut sql, q, &mut args);
+    let needle = q.search.trim();
+    if !needle.is_empty() {
+        sql.push_str(" AND (r.owner || '/' || r.name) LIKE ?");
+        args.push(Box::new(format!("%{needle}%")));
+    }
+    sql.push_str(" GROUP BY r.id");
+    if !keys_only {
+        sql.push_str(REPO_ORDER);
+        sql.push_str(", r.owner, r.name");
+    }
+    (sql, args)
+}
+
+/// Both repo lists project the same six columns in the same order.
+fn repo_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<RepoRow> {
+    Ok(RepoRow {
+        owner: r.get(0)?,
+        name: r.get(1)?,
+        open_prs: r.get::<_, i64>(2)? as usize,
+        bot_prs: r.get::<_, i64>(3)? as usize,
+        open_issues: r.get::<_, i64>(4)? as usize,
+        unread: r.get::<_, i64>(5)? as usize,
+        updated_at: r.get(6)?,
+    })
+}
+
+/// SQL predicate matching [`crate::model::DEPENDABOT_LOGINS`].
+fn dependabot_sql(column: &str) -> String {
+    let list: Vec<String> = crate::model::DEPENDABOT_LOGINS
+        .iter()
+        .map(|bot| format!("'{bot}'"))
+        .collect();
+    format!("lower(IFNULL({column}, '')) IN ({})", list.join(", "))
+}
+
+/// Same shape and order as [`repo_list_sql`], but rows come from the fetched
+/// owned-repo list and only `unread` is joined back from the cache.
+fn owned_repo_list_sql(
+    q: &ItemQuery,
+    keys_only: bool,
+) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let projection = if keys_only {
+        "o.owner"
+    } else {
+        "o.owner, o.name, o.open_prs, o.bot_prs, o.open_issues,
+         (SELECT COUNT(*)
+            FROM items i JOIN repos r ON r.id = i.repo_id
+           WHERE i.unread = 1
+             AND lower(r.owner) = lower(o.owner)
+             AND lower(r.name)  = lower(o.name)) AS unread,
+         o.pushed_at AS updated_at"
+    };
+    let mut sql = format!("SELECT {projection} FROM owned_repos o WHERE 1=1");
+    if !q.allowed_repos.is_empty() {
+        sql.push_str(" AND (o.owner || '/' || o.name) IN (");
+        for (i, repo) in q.allowed_repos.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            args.push(Box::new(repo.clone()));
+        }
+        sql.push(')');
+    }
+    let needle = q.search.trim();
+    if !needle.is_empty() {
+        sql.push_str(" AND (o.owner || '/' || o.name) LIKE ?");
+        args.push(Box::new(format!("%{needle}%")));
+    }
+    if !keys_only {
+        sql.push_str(REPO_ORDER);
+        sql.push_str(", o.owner, o.name");
+    }
+    (sql, args)
+}
+
+fn apply_view_filter(sql: &mut String, q: &ItemQuery) {
+    if let Some(kind) = q.scope_kind {
+        // Repo-scoped lists ignore the involvement views entirely.
+        sql.push_str(match kind {
+            Kind::Pr => " AND i.kind = 'pr'",
+            Kind::Issue => " AND i.kind = 'issue'",
+        });
+        return;
+    }
+    match q.view {
+        View::Inbox | View::SeenRepos | View::MyRepos => sql.push_str(" AND 0"),
         View::AllPrs => {
             sql.push_str(
                 " AND i.kind = 'pr' AND i.state = 'open' AND i.id IN (
@@ -1209,7 +1521,7 @@ fn apply_time_filter(
     q: &ItemQuery,
     args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
 ) {
-    if !q.view.uses_time_filter() {
+    if q.is_scoped() || !q.view.uses_time_filter() {
         return;
     }
     if let Some(cut) = q.time.cutoff() {
@@ -1237,6 +1549,18 @@ fn apply_repo_filter(
         args.push(Box::new(repo.clone()));
     }
     sql.push(')');
+}
+
+fn apply_scope_filter(
+    sql: &mut String,
+    q: &ItemQuery,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    let Some(repo) = &q.scope_repo else {
+        return;
+    };
+    sql.push_str(" AND lower(r.owner || '/' || r.name) = lower(?)");
+    args.push(Box::new(repo.clone()));
 }
 
 fn apply_search_filter(
@@ -1494,5 +1818,231 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].github_id, "gh-2");
         assert!(rows[0].unread);
+    }
+
+    #[test]
+    fn repos_sorted_by_open_prs() {
+        let db = Db::open(":memory:").unwrap();
+        let mut authored = BTreeSet::new();
+        authored.insert(Role::Authored);
+        for n in [1, 2, 3] {
+            let pr = sample("acme", "busy", n, Kind::Pr, ItemState::Open);
+            db.upsert_item(&pr, &authored, false, true).unwrap();
+        }
+        let one = sample("acme", "quiet", 9, Kind::Pr, ItemState::Open);
+        db.upsert_item(&one, &authored, false, true).unwrap();
+        let closed = sample("acme", "quiet", 10, Kind::Pr, ItemState::Merged);
+        db.upsert_item(&closed, &authored, false, true).unwrap();
+        let issue = sample("acme", "quiet", 11, Kind::Issue, ItemState::Open);
+        db.upsert_item(&issue, &authored, true, true).unwrap();
+
+        let q = ItemQuery::default();
+        let repos = db.list_repos(&q).unwrap();
+        assert_eq!(repos.len(), 2, "{repos:?}");
+        assert_eq!(repos[0].full_name(), "acme/busy");
+        assert_eq!(repos[0].open_prs, 3);
+        assert_eq!(repos[1].full_name(), "acme/quiet");
+        assert_eq!(repos[1].open_prs, 1);
+        assert_eq!(repos[1].open_issues, 1);
+        assert_eq!(repos[1].unread, 1);
+        assert_eq!(db.count_repos(&q).unwrap(), 2);
+    }
+
+    #[test]
+    fn scoped_list_ignores_view_and_keeps_open_first() {
+        let db = Db::open(":memory:").unwrap();
+        // No roles at all: the involvement views would hide these.
+        let mut merged = sample("acme", "box", 1, Kind::Pr, ItemState::Merged);
+        merged.updated_at = Some("2026-09-01T00:00:00Z".into());
+        db.upsert_item(&merged, &BTreeSet::new(), false, true)
+            .unwrap();
+        let mut open = sample("acme", "box", 2, Kind::Pr, ItemState::Open);
+        open.updated_at = Some("2026-01-01T00:00:00Z".into());
+        db.upsert_item(&open, &BTreeSet::new(), false, true)
+            .unwrap();
+        let issue = sample("acme", "box", 3, Kind::Issue, ItemState::Open);
+        db.upsert_item(&issue, &BTreeSet::new(), false, true)
+            .unwrap();
+        let other = sample("other", "repo", 4, Kind::Pr, ItemState::Open);
+        db.upsert_item(&other, &BTreeSet::new(), false, true)
+            .unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::MyPrs;
+        q.scope_repo = Some("acme/box".into());
+        q.scope_kind = Some(Kind::Pr);
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            rows[0].number, 2,
+            "open PR sorts above the newer merged one"
+        );
+        assert_eq!(rows[1].number, 1);
+        assert_eq!(db.count(&q).unwrap(), 2);
+
+        q.scope_kind = Some(Kind::Issue);
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].number, 3);
+    }
+
+    #[test]
+    fn dependabot_prs_get_their_own_column() {
+        let db = Db::open(":memory:").unwrap();
+        let bot_pr = |repo: &str, n: i64, login: &str| {
+            let mut item = sample("acme", repo, n, Kind::Pr, ItemState::Open);
+            item.author = Some(login.into());
+            item
+        };
+        // acme/noisy: 3 dependabot, 1 human. acme/real: 2 human.
+        for (n, login) in [
+            (1, "dependabot"),
+            (2, "dependabot[bot]"),
+            (3, "Dependabot-Preview[bot]"),
+            (4, "zveinn"),
+        ] {
+            db.upsert_item(&bot_pr("noisy", n, login), &BTreeSet::new(), false, true)
+                .unwrap();
+        }
+        for n in [5, 6] {
+            db.upsert_item(&bot_pr("real", n, "zveinn"), &BTreeSet::new(), false, true)
+                .unwrap();
+        }
+        // A closed dependabot PR must not be counted at all.
+        let mut merged = bot_pr("noisy", 7, "dependabot");
+        merged.state = ItemState::Merged;
+        db.upsert_item(&merged, &BTreeSet::new(), false, true)
+            .unwrap();
+
+        let rows = db.list_repos(&ItemQuery::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].full_name(),
+            "acme/real",
+            "2 human PRs outrank 1 human + 3 bot"
+        );
+        assert_eq!(rows[0].open_prs, 2);
+        assert_eq!(rows[0].bot_prs, 0);
+        assert_eq!(rows[1].full_name(), "acme/noisy");
+        assert_eq!(rows[1].open_prs, 1, "only the human PR");
+        assert_eq!(rows[1].bot_prs, 3, "case-insensitive, all variants");
+        assert_eq!(rows[1].total_prs(), 4, "the closed one stays out");
+    }
+
+    /// The SQL predicate and the Rust one must agree, or the two repo lists
+    /// would disagree about the same author.
+    #[test]
+    fn dependabot_sql_matches_the_rust_predicate() {
+        let db = Db::open(":memory:").unwrap();
+        let sql = dependabot_sql("?1");
+        for login in [
+            "dependabot",
+            "dependabot[bot]",
+            "DEPENDABOT",
+            "dependabot-preview[bot]",
+            "zveinn",
+            "renovate[bot]",
+            "",
+        ] {
+            let hit: bool = db
+                .with(|c| {
+                    Ok(c.query_row(&format!("SELECT {sql}"), params![login], |r| {
+                        r.get::<_, i64>(0)
+                    })?)
+                })
+                .unwrap()
+                != 0;
+            assert_eq!(hit, crate::model::is_dependabot(login), "{login:?}");
+        }
+    }
+
+    #[test]
+    fn owned_repos_keep_github_counts_and_join_unread() {
+        let db = Db::open(":memory:").unwrap();
+        let mut authored = BTreeSet::new();
+        authored.insert(Role::Authored);
+        // One cached unread PR in acme/one; nothing cached for acme/two.
+        db.upsert_item(
+            &sample("acme", "one", 1, Kind::Pr, ItemState::Open),
+            &authored,
+            true,
+            true,
+        )
+        .unwrap();
+
+        let owned = |name: &str, prs: usize, bots: usize| RepoRow {
+            owner: "acme".into(),
+            name: name.into(),
+            open_prs: prs,
+            bot_prs: bots,
+            open_issues: 0,
+            unread: 0,
+            updated_at: Some("2026-09-01T00:00:00Z".into()),
+        };
+        db.replace_owned_repos(&[owned("one", 3, 1), owned("two", 12, 0)])
+            .unwrap();
+
+        let q = ItemQuery::default();
+        let rows = db.list_owned_repos(&q).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].full_name(), "acme/two", "most open PRs first");
+        assert_eq!(rows[0].open_prs, 12, "GitHub's count, not the cache's");
+        assert_eq!(rows[0].unread, 0);
+        assert_eq!(rows[1].full_name(), "acme/one");
+        assert_eq!(rows[1].open_prs, 3);
+        assert_eq!(rows[1].bot_prs, 1);
+        assert_eq!(rows[1].total_prs(), 4);
+        assert_eq!(rows[1].unread, 1, "unread joins back from the cache");
+        assert_eq!(db.count_owned_repos(&q).unwrap(), 2);
+
+        // Seen Repos is unaffected: it only knows the repo it cached an item for.
+        let seen = db.list_repos(&q).unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].full_name(), "acme/one");
+        assert_eq!(seen[0].open_prs, 1);
+
+        let mut filtered = ItemQuery::default();
+        filtered.search = "two".into();
+        assert_eq!(db.list_owned_repos(&filtered).unwrap().len(), 1);
+        let mut allowed = ItemQuery::default();
+        allowed.allowed_repos = vec!["acme/one".into()];
+        assert_eq!(db.list_owned_repos(&allowed).unwrap().len(), 1);
+
+        db.replace_owned_repos(&[owned("two", 12, 0)]).unwrap();
+        let rows = db.list_owned_repos(&q).unwrap();
+        assert_eq!(rows.len(), 1, "a refetch replaces the whole list");
+    }
+
+    #[test]
+    fn workflow_runs_replace_per_repo() {
+        let db = Db::open(":memory:").unwrap();
+        let run = |id: i64, num: i64| RunRow {
+            github_id: id,
+            owner: "acme".into(),
+            repo: "box".into(),
+            name: "ci".into(),
+            title: format!("run {num}"),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            event: "push".into(),
+            branch: "main".into(),
+            run_number: num,
+            actor: Some("me".into()),
+            html_url: Some(format!("https://github.com/acme/box/actions/runs/{id}")),
+            created_at: Some(format!("2026-09-0{num}T00:00:00Z")),
+            updated_at: None,
+        };
+        db.replace_workflow_runs("acme", "box", &[run(1, 1), run(2, 2)])
+            .unwrap();
+        let rows = db.list_workflow_runs("acme", "box").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].run_number, 2, "newest first");
+
+        db.replace_workflow_runs("acme", "box", &[run(3, 3)])
+            .unwrap();
+        let rows = db.list_workflow_runs("acme", "box").unwrap();
+        assert_eq!(rows.len(), 1, "a refetch replaces the repo's runs");
+        assert_eq!(rows[0].github_id, 3);
+        assert!(db.list_workflow_runs("acme", "other").unwrap().is_empty());
     }
 }

@@ -16,12 +16,16 @@ const HYDRATE_BATCH: usize = 20;
 const OPEN_REFRESH_AGE_HOURS: i64 = 6;
 const SAFETY_SEARCH_HOURS: i64 = 36;
 
+const RUNS_PER_REPO: usize = 30;
+
 #[derive(Debug, Clone)]
 pub enum SyncKind {
     Poll,
     Search,
     RefreshItem,
     Comments,
+    Actions,
+    OwnedRepos,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,13 @@ pub enum SyncCmd {
         number: i64,
         item_id: i64,
     },
+    /// Latest Actions workflow runs for one repository.
+    Actions {
+        owner: String,
+        repo: String,
+    },
+    /// Full list of repositories the user owns.
+    OwnedRepos,
     Shutdown,
 }
 
@@ -206,6 +217,63 @@ pub async fn run_worker(
                                 },
                             ),
                         }
+                    }
+                    Some(SyncCmd::Actions { owner, repo }) => {
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::Actions,
+                                message: format!("actions {owner}/{repo}"),
+                            },
+                        );
+                        match load_runs(&db, &client, &owner, &repo).await {
+                            Ok(n) => emit(
+                                &ev_tx,
+                                SyncEvent::Finished {
+                                    kind: SyncKind::Actions,
+                                    fetched: 1,
+                                    upserted: n,
+                                    unread: 0,
+                                    message: format!("{n} workflow runs"),
+                                },
+                            ),
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::Actions,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                    }
+                    Some(SyncCmd::OwnedRepos) => {
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::OwnedRepos,
+                                message: "your repositories".into(),
+                            },
+                        );
+                        match load_owned_repos(&db, &client).await {
+                            Ok(n) => emit(
+                                &ev_tx,
+                                SyncEvent::Finished {
+                                    kind: SyncKind::OwnedRepos,
+                                    fetched: 1,
+                                    upserted: n,
+                                    unread: 0,
+                                    message: format!("{n} repos you own"),
+                                },
+                            ),
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::OwnedRepos,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                        emit_rate(&ev_tx, &client);
                     }
                 }
             }
@@ -657,6 +725,20 @@ async fn refresh_one(
         .with_context(|| format!("{owner}/{repo}#{number} not found"))?;
     persist(db, &item, &me, None, None, false)?;
     Ok(())
+}
+
+async fn load_owned_repos(db: &Db, client: &GhClient) -> Result<u32> {
+    let repos = client.owned_repos().await?;
+    let n = repos.len() as u32;
+    db.replace_owned_repos(&repos)?;
+    Ok(n)
+}
+
+async fn load_runs(db: &Db, client: &GhClient, owner: &str, repo: &str) -> Result<u32> {
+    let runs = client.workflow_runs(owner, repo, RUNS_PER_REPO).await?;
+    let n = runs.len() as u32;
+    db.replace_workflow_runs(owner, repo, &runs)?;
+    Ok(n)
 }
 
 async fn load_comments(

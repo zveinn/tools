@@ -440,6 +440,112 @@ pub struct ItemDetail {
     pub comments_fetched_at: Option<String>,
 }
 
+/// Logins GitHub reports for Dependabot. GraphQL gives the bare `dependabot`
+/// for the Bot actor; REST and older installs use the `[bot]` suffix.
+pub const DEPENDABOT_LOGINS: [&str; 4] = [
+    "dependabot",
+    "dependabot[bot]",
+    "dependabot-preview",
+    "dependabot-preview[bot]",
+];
+
+pub fn is_dependabot(login: &str) -> bool {
+    DEPENDABOT_LOGINS
+        .iter()
+        .any(|bot| login.eq_ignore_ascii_case(bot))
+}
+
+/// One repository row: a repo xgit has items for (Seen Repos), or one the
+/// viewer owns (My Repos). Both views render it identically.
+#[derive(Debug, Clone)]
+pub struct RepoRow {
+    pub owner: String,
+    pub name: String,
+    /// Open PRs a human opened — Dependabot's are counted in `bot_prs`.
+    pub open_prs: usize,
+    pub bot_prs: usize,
+    pub open_issues: usize,
+    pub unread: usize,
+    pub updated_at: Option<String>,
+}
+
+impl RepoRow {
+    pub fn full_name(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
+    pub fn html_url(&self) -> String {
+        format!("https://github.com/{}/{}", self.owner, self.name)
+    }
+
+    pub fn total_prs(&self) -> usize {
+        self.open_prs + self.bot_prs
+    }
+}
+
+/// Sub-views of a single repository, shown in the repo bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoTab {
+    Prs,
+    Issues,
+    Actions,
+}
+
+impl RepoTab {
+    pub const ALL: [RepoTab; 3] = [RepoTab::Prs, RepoTab::Issues, RepoTab::Actions];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Prs => "PRs",
+            Self::Issues => "Issues",
+            Self::Actions => "Actions",
+        }
+    }
+
+    pub fn kind(self) -> Option<Kind> {
+        match self {
+            Self::Prs => Some(Kind::Pr),
+            Self::Issues => Some(Kind::Issue),
+            Self::Actions => None,
+        }
+    }
+
+    pub fn shift(self, delta: i32) -> Self {
+        let len = Self::ALL.len() as i32;
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0) as i32;
+        Self::ALL[(idx + delta).rem_euclid(len) as usize]
+    }
+}
+
+/// One GitHub Actions workflow run, shown in a repo's Actions tab.
+#[derive(Debug, Clone)]
+pub struct RunRow {
+    pub github_id: i64,
+    pub owner: String,
+    pub repo: String,
+    pub name: String,
+    pub title: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub event: String,
+    pub branch: String,
+    pub run_number: i64,
+    pub actor: Option<String>,
+    pub html_url: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl RunRow {
+    /// `conclusion` once finished, otherwise the in-flight `status`.
+    pub fn outcome(&self) -> &str {
+        match self.conclusion.as_deref() {
+            Some(c) if !c.is_empty() => c,
+            _ => self.status.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Inbox,
@@ -448,16 +554,20 @@ pub enum View {
     ClosedPrs,
     AllIssues,
     ClosedIssues,
+    SeenRepos,
+    MyRepos,
 }
 
 impl View {
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 8] = [
         View::Inbox,
         View::AllPrs,
         View::MyPrs,
         View::ClosedPrs,
         View::AllIssues,
         View::ClosedIssues,
+        View::SeenRepos,
+        View::MyRepos,
     ];
 
     pub fn name(self) -> &'static str {
@@ -468,7 +578,14 @@ impl View {
             Self::ClosedPrs => "Closed PRs",
             Self::AllIssues => "All Issues",
             Self::ClosedIssues => "Closed Issues",
+            Self::SeenRepos => "Seen Repos",
+            Self::MyRepos => "My Repos",
         }
+    }
+
+    /// Lists repositories rather than issues and PRs.
+    pub fn is_repo_list(self) -> bool {
+        matches!(self, Self::SeenRepos | Self::MyRepos)
     }
 
     pub fn shift(self, delta: i32) -> Self {
@@ -603,6 +720,16 @@ pub struct ItemQuery {
     pub state: StateFilter,
     pub search: String,
     pub allowed_repos: Vec<String>,
+    /// `owner/name` when the list is scoped to one repository. Replaces the
+    /// view filter: every cached item of `scope_kind` in that repo is listed.
+    pub scope_repo: Option<String>,
+    pub scope_kind: Option<Kind>,
+}
+
+impl ItemQuery {
+    pub fn is_scoped(&self) -> bool {
+        self.scope_repo.is_some()
+    }
 }
 
 impl Default for View {
@@ -675,9 +802,55 @@ mod tests {
     #[test]
     fn view_shift_wraps() {
         assert_eq!(View::Inbox.shift(1), View::AllPrs);
-        assert_eq!(View::Inbox.shift(-1), View::ClosedIssues);
-        assert_eq!(View::ClosedIssues.shift(1), View::Inbox);
+        assert_eq!(View::Inbox.shift(-1), View::MyRepos);
+        assert_eq!(View::MyRepos.shift(1), View::Inbox);
+        assert_eq!(View::ClosedIssues.shift(1), View::SeenRepos);
+        assert_eq!(View::SeenRepos.shift(1), View::MyRepos);
         assert_eq!(View::MyPrs.shift(2), View::AllIssues);
+        assert!(View::SeenRepos.is_repo_list() && View::MyRepos.is_repo_list());
+        assert!(!View::AllPrs.is_repo_list());
+    }
+
+    #[test]
+    fn dependabot_logins_match_case_insensitively() {
+        assert!(is_dependabot("dependabot"));
+        assert!(is_dependabot("dependabot[bot]"));
+        assert!(is_dependabot("Dependabot[bot]"));
+        assert!(is_dependabot("dependabot-preview[bot]"));
+        assert!(!is_dependabot("zveinn"));
+        assert!(!is_dependabot("renovate[bot]"));
+        assert!(!is_dependabot(""));
+    }
+
+    #[test]
+    fn repo_tab_shift_wraps() {
+        assert_eq!(RepoTab::Prs.shift(1), RepoTab::Issues);
+        assert_eq!(RepoTab::Prs.shift(-1), RepoTab::Actions);
+        assert_eq!(RepoTab::Actions.shift(1), RepoTab::Prs);
+    }
+
+    #[test]
+    fn run_outcome_prefers_conclusion() {
+        let mut run = RunRow {
+            github_id: 1,
+            owner: "acme".into(),
+            repo: "box".into(),
+            name: "ci".into(),
+            title: "fix it".into(),
+            status: "in_progress".into(),
+            conclusion: None,
+            event: "push".into(),
+            branch: "main".into(),
+            run_number: 7,
+            actor: None,
+            html_url: None,
+            created_at: None,
+            updated_at: None,
+        };
+        assert_eq!(run.outcome(), "in_progress");
+        run.status = "completed".into();
+        run.conclusion = Some("failure".into());
+        assert_eq!(run.outcome(), "failure");
     }
 
     #[test]

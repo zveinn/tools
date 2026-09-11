@@ -11,12 +11,17 @@ use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::config::Config;
-use crate::model::{HydratedItem, Role};
+use crate::model::{HydratedItem, RepoRow, Role, RunRow};
 
 pub use parse::comments_from_value;
 
 const USER_AGENT: &str = concat!("xgit/", env!("CARGO_PKG_VERSION"));
 const API_VERSION: &str = "2022-11-28";
+/// 25 repos a page, so ~600 owned repos before the runaway guard trips.
+const OWNED_REPO_PAGES: usize = 24;
+/// Open PRs sampled per repo to split Dependabot out of the count. Matches
+/// the `first:` in [`queries::OWNED_REPOS`].
+pub const OWNED_REPO_PR_SAMPLE: usize = 100;
 
 #[derive(Debug, Clone, Default)]
 pub struct RateSnapshot {
@@ -333,6 +338,73 @@ impl GhClient {
         })
     }
 
+    /// Every repository the viewer owns, with GitHub's repo-wide open PR and
+    /// issue counts. Pages until GitHub runs out (capped, as a backstop).
+    pub async fn owned_repos(&self) -> Result<Vec<RepoRow>> {
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..OWNED_REPO_PAGES {
+            let data = self
+                .graphql(queries::OWNED_REPOS, json!({ "after": after }))
+                .await
+                .context("owned repos")?;
+            let repos = data
+                .pointer("/viewer/repositories")
+                .context("viewer.repositories missing")?;
+            if let Some(nodes) = repos.get("nodes").and_then(Value::as_array) {
+                for node in nodes {
+                    if let Some(repo) = parse::owned_repo_from_value(node) {
+                        out.push(repo);
+                    }
+                }
+            }
+            let has_next = repos
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !has_next {
+                break;
+            }
+            after = repos
+                .pointer("/pageInfo/endCursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Most recent Actions workflow runs for one repository.
+    pub async fn workflow_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+    ) -> Result<Vec<RunRow>> {
+        let url = format!(
+            "{}/repos/{owner}/{repo}/actions/runs?per_page={}",
+            self.api_url,
+            limit.clamp(1, 100)
+        );
+        let resp = self.send_rest(self.http.get(&url)).await?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            bail!("no Actions for {owner}/{repo} (or the token cannot read them)");
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("workflow runs {status}: {body}");
+        }
+        let parsed: RawRuns = resp.json().await.context("decode workflow runs")?;
+        Ok(parsed
+            .workflow_runs
+            .into_iter()
+            .map(|raw| raw.into_run(owner, repo))
+            .collect())
+    }
+
     fn store_poll(&self, poll_interval: Option<u64>) {
         if let Ok(mut g) = self.rate.lock() {
             g.poll_interval = poll_interval;
@@ -501,6 +573,49 @@ struct RawOwner {
     login: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawRuns {
+    #[serde(default)]
+    workflow_runs: Vec<RawRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRun {
+    id: Option<i64>,
+    name: Option<String>,
+    display_title: Option<String>,
+    head_branch: Option<String>,
+    run_number: Option<i64>,
+    event: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    actor: Option<RawOwner>,
+}
+
+impl RawRun {
+    fn into_run(self, owner: &str, repo: &str) -> RunRow {
+        RunRow {
+            github_id: self.id.unwrap_or_default(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            name: self.name.unwrap_or_default(),
+            title: self.display_title.unwrap_or_default(),
+            status: self.status.unwrap_or_default(),
+            conclusion: self.conclusion.filter(|c| !c.is_empty()),
+            event: self.event.unwrap_or_default(),
+            branch: self.head_branch.unwrap_or_default(),
+            run_number: self.run_number.unwrap_or_default(),
+            actor: self.actor.and_then(|a| a.login),
+            html_url: self.html_url,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
 impl RawNotification {
     fn into_notif(self) -> Option<Notification> {
         let subject = self.subject?;
@@ -624,6 +739,39 @@ mod tests {
         assert_eq!(n.title, "Fix it");
         assert_eq!(n.owner, "acme");
         assert_eq!(n.extra_role(), Some(Role::ReviewRequested));
+    }
+
+    #[test]
+    fn parse_workflow_runs_payload() {
+        let raw = r#"{
+            "total_count": 1,
+            "workflow_runs": [{
+                "id": 99,
+                "name": "CI",
+                "display_title": "fix the thing",
+                "head_branch": "main",
+                "run_number": 42,
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/acme/box/actions/runs/99",
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-01T00:05:00Z",
+                "actor": { "login": "octo" }
+            }]
+        }"#;
+        let parsed: RawRuns = serde_json::from_str(raw).unwrap();
+        let run = parsed
+            .workflow_runs
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_run("acme", "box");
+        assert_eq!(run.github_id, 99);
+        assert_eq!(run.owner, "acme");
+        assert_eq!(run.run_number, 42);
+        assert_eq!(run.actor.as_deref(), Some("octo"));
+        assert_eq!(run.outcome(), "failure");
     }
 
     #[test]

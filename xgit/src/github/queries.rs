@@ -226,6 +226,39 @@ pub fn nodes() -> String {
     format!("{ITEM_FRAGMENTS}\n{NODES_BODY}")
 }
 
+/// Repositories the viewer owns personally, with GitHub's own open counts.
+/// `ownerAffiliations: [OWNER]` excludes org repos and repos they only
+/// collaborate on.
+///
+/// PR authors come along so Dependabot can be split out of the open-PR count;
+/// `totalCount` stays authoritative for the total. Pages are kept small
+/// because each repo pulls up to `OWNED_REPO_PR_SAMPLE` PR nodes.
+pub const OWNED_REPOS: &str = r#"
+query OwnedRepos($after: String) {
+  viewer {
+    repositories(
+      first: 25
+      after: $after
+      ownerAffiliations: [OWNER]
+      orderBy: { field: PUSHED_AT, direction: DESC }
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        pushedAt
+        owner { login }
+        pullRequests(states: OPEN, first: 100) {
+          totalCount
+          nodes { author { login } }
+        }
+        issues(states: OPEN) { totalCount }
+      }
+    }
+  }
+  rateLimit { cost remaining resetAt limit }
+}
+"#;
+
 pub const COMMENTS: &str = r#"
 query Comments($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
