@@ -1,6 +1,6 @@
 mod ui;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -13,8 +13,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::Config;
 use crate::db::Db;
 use crate::model::{
-    InboxRow, ItemDetail, ItemQuery, ItemRow, RepoRow, RepoTab, RunRow, StateFilter, TimeRange,
-    View,
+    Comment, HydratedItem, InboxRow, ItemDetail, ItemQuery, ItemRow, RepoRow, RepoTab, RunRow,
+    StateFilter, TimeRange, View,
 };
 use crate::sync::{SyncCmd, SyncEvent, SyncKind};
 
@@ -83,16 +83,71 @@ pub(crate) enum FlatRow {
 
 /// A single repository taken over the whole window: the main tab bar is
 /// replaced by a repo bar with its own PRs / Issues / Actions tabs.
-#[derive(Debug, Clone)]
+///
+/// Everything in here is fetched from GitHub when the repo is opened and
+/// dropped when it closes — the repo browser never reads or writes the cache,
+/// so it always shows the repository as it is right now.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Scope {
     pub(crate) owner: String,
     pub(crate) repo: String,
     pub(crate) tab: RepoTab,
+    pub(crate) prs: Vec<HydratedItem>,
+    pub(crate) issues: Vec<HydratedItem>,
+    pub(crate) runs: Vec<RunRow>,
+    /// GitHub's open totals, which can exceed what was fetched.
+    pub(crate) open_prs: usize,
+    pub(crate) open_issues: usize,
+    /// Comments fetched on demand, keyed by item number (PRs and issues
+    /// share one numbering space per repo).
+    pub(crate) comments: HashMap<i64, Vec<Comment>>,
+    pub(crate) items_loaded: bool,
+    pub(crate) runs_loaded: bool,
+    /// The repo-list filter, parked while the repo is open: it selected this
+    /// repo, so it must not also filter the repo's contents.
+    saved_search: String,
 }
 
 impl Scope {
+    fn new(owner: String, repo: String) -> Self {
+        Self {
+            owner,
+            repo,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn full_name(&self) -> String {
         format!("{}/{}", self.owner, self.repo)
+    }
+
+    fn is(&self, owner: &str, repo: &str) -> bool {
+        self.owner.eq_ignore_ascii_case(owner) && self.repo.eq_ignore_ascii_case(repo)
+    }
+
+    /// Items behind the open tab, open-first then newest.
+    fn tab_items(&self) -> &[HydratedItem] {
+        match self.tab {
+            RepoTab::Prs => &self.prs,
+            RepoTab::Issues => &self.issues,
+            RepoTab::Actions => &[],
+        }
+    }
+
+    /// What the tab badge shows: GitHub's total, not the fetched slice.
+    fn tab_total(&self, tab: RepoTab) -> usize {
+        match tab {
+            RepoTab::Prs => self.open_prs,
+            RepoTab::Issues => self.open_issues,
+            RepoTab::Actions => self.runs.len(),
+        }
+    }
+
+    fn loading(&self) -> bool {
+        match self.tab {
+            RepoTab::Actions => !self.runs_loaded,
+            _ => !self.items_loaded,
+        }
     }
 }
 
@@ -109,11 +164,8 @@ pub(crate) struct App {
     flat: Vec<FlatRow>,
     counts: Vec<(View, usize)>,
     scope: Option<Scope>,
-    scope_counts: Vec<(RepoTab, usize)>,
     /// View to restore when esc leaves a repo scope.
     return_view: View,
-    /// Repos whose Actions runs were already requested this session.
-    runs_requested: HashSet<String>,
     /// Whether the owned-repo list was already requested this session.
     owned_requested: bool,
     selected: usize,
@@ -168,9 +220,7 @@ impl App {
             flat: Vec::new(),
             counts: Vec::new(),
             scope: None,
-            scope_counts: Vec::new(),
             return_view: View::SeenRepos,
-            runs_requested: HashSet::new(),
             owned_requested: false,
             selected: 0,
             table_state: ratatui::widgets::TableState::default(),
@@ -268,11 +318,58 @@ impl App {
             }
             SyncEvent::Failed { kind, error } => {
                 self.syncing = false;
+                // Stop the repo browser waiting on a fetch that will not come.
+                if let Some(scope) = self.scope.as_mut() {
+                    match kind {
+                        SyncKind::RepoBrowse => scope.items_loaded = true,
+                        SyncKind::Actions => scope.runs_loaded = true,
+                        _ => {}
+                    }
+                }
                 self.set_status(StatusKind::Err, format!("{}: {error}", kind_label(kind)));
             }
             SyncEvent::Rate { remaining, limit } => {
                 self.gql_remaining = remaining;
                 self.gql_limit = limit;
+            }
+            SyncEvent::RepoItems {
+                owner,
+                repo,
+                browse,
+            } => {
+                // Ignore a late arrival for a repo we already left.
+                if let Some(scope) = self.scope.as_mut()
+                    && scope.is(&owner, &repo)
+                {
+                    scope.prs = browse.prs.clone();
+                    scope.issues = browse.issues.clone();
+                    scope.open_prs = browse.open_prs;
+                    scope.open_issues = browse.open_issues;
+                    scope.items_loaded = true;
+                    self.rebuild_scope();
+                }
+            }
+            SyncEvent::RepoRuns { owner, repo, runs } => {
+                if let Some(scope) = self.scope.as_mut()
+                    && scope.is(&owner, &repo)
+                {
+                    scope.runs = runs;
+                    scope.runs_loaded = true;
+                    self.rebuild_scope();
+                }
+            }
+            SyncEvent::RepoComments {
+                owner,
+                repo,
+                number,
+                comments,
+            } => {
+                if let Some(scope) = self.scope.as_mut()
+                    && scope.is(&owner, &repo)
+                {
+                    scope.comments.insert(number, comments);
+                    self.load_detail();
+                }
             }
         }
     }
@@ -520,24 +617,56 @@ impl App {
         }
     }
 
-    /// Repo name plus PRs / Issues / Actions replace the main tab bar.
+    /// Repo name plus PRs / Issues / Actions replace the main tab bar, and
+    /// everything in them is fetched fresh.
     fn enter_scope(&mut self) {
         let Some(repo) = self.selected_repo() else {
             return;
         };
-        let scope = Scope {
-            owner: repo.owner.clone(),
-            repo: repo.name.clone(),
-            tab: RepoTab::Prs,
-        };
+        let mut scope = Scope::new(repo.owner.clone(), repo.name.clone());
         let name = scope.full_name();
+        scope.saved_search = std::mem::take(&mut self.query.search);
+        self.filter_buf.clear();
         self.return_view = self.query.view;
         self.scope = Some(scope);
         self.focus = Focus::List;
         self.detail_scroll = 0;
         self.selected = 0;
-        self.reload();
-        self.set_status(StatusKind::Info, format!("{name}  ·  h/l tabs"));
+        self.items.clear();
+        self.detail = None;
+        self.flat.clear();
+        self.fetch_scope();
+        self.set_status(StatusKind::Info, format!("{name}  ·  fetching"));
+    }
+
+    /// One GraphQL call for the open PRs and issues, one REST call for the
+    /// workflow runs. Called on every enter and on `r` → this item.
+    fn fetch_scope(&mut self) {
+        let Some(scope) = self.scope.as_mut() else {
+            return;
+        };
+        scope.items_loaded = false;
+        scope.runs_loaded = false;
+        scope.prs.clear();
+        scope.issues.clear();
+        scope.runs.clear();
+        scope.comments.clear();
+        let (owner, repo) = (scope.owner.clone(), scope.repo.clone());
+        if self.cfg.offline || !self.cfg.has_token() {
+            if let Some(scope) = self.scope.as_mut() {
+                scope.items_loaded = true;
+                scope.runs_loaded = true;
+            }
+            self.set_status(StatusKind::Warn, "offline / no token — nothing to show");
+            self.rebuild_scope();
+            return;
+        }
+        let _ = self.cmd_tx.send(SyncCmd::RepoBrowse {
+            owner: owner.clone(),
+            repo: repo.clone(),
+        });
+        let _ = self.cmd_tx.send(SyncCmd::Actions { owner, repo });
+        self.rebuild_scope();
     }
 
     fn leave_scope(&mut self) {
@@ -547,8 +676,8 @@ impl App {
         self.query.view = self.return_view;
         self.query.scope_repo = None;
         self.query.scope_kind = None;
-        self.runs.clear();
-        self.scope_counts.clear();
+        self.query.search = scope.saved_search.clone();
+        self.filter_buf = self.query.search.clone();
         self.focus = Focus::List;
         self.detail_scroll = 0;
         if self.query.view.is_repo_list() {
@@ -565,8 +694,7 @@ impl App {
                 scope.tab = scope.tab.shift(delta);
                 self.selected = 0;
                 self.detail_scroll = 0;
-                self.reload();
-                self.request_runs(false);
+                self.rebuild_scope();
             }
             None => {
                 self.shift_view(delta);
@@ -592,42 +720,57 @@ impl App {
         self.set_status(StatusKind::Info, "loading your repositories");
     }
 
-    /// Actions runs are never part of the background poll — fetch on demand.
-    fn request_runs(&mut self, force: bool) {
+    /// The login the fetched items are compared against for the role badges.
+    fn me(&self) -> String {
+        self.cfg
+            .username
+            .clone()
+            .or_else(|| self.db.meta_get("viewer_login").ok().flatten())
+            .unwrap_or_default()
+    }
+
+    /// Rebuild the list from what the repo browser holds in memory.
+    fn rebuild_scope(&mut self) {
+        let me = self.me();
         let Some(scope) = self.scope.as_ref() else {
             return;
         };
-        if scope.tab != RepoTab::Actions {
-            return;
-        }
-        let key = scope.full_name();
-        if !force && self.runs_requested.contains(&key) {
-            return;
-        }
-        if self.cfg.offline || !self.cfg.has_token() {
-            self.set_status(StatusKind::Warn, "offline / no token");
-            return;
-        }
-        let (owner, repo) = (scope.owner.clone(), scope.repo.clone());
-        self.runs_requested.insert(key);
-        let _ = self.cmd_tx.send(SyncCmd::Actions { owner, repo });
-        self.set_status(StatusKind::Info, "loading workflow runs");
-    }
+        let keep = self.current_item().map(|i| i.number);
+        let keep_run = self.selected_run().map(|r| r.github_id);
+        self.inbox.clear();
+        self.repos.clear();
 
-    /// The base query plus the repo scope, when one is open.
-    fn effective_query(&self) -> ItemQuery {
-        let mut q = self.query.clone();
-        match self.scope.as_ref() {
-            Some(scope) => {
-                q.scope_repo = Some(scope.full_name());
-                q.scope_kind = scope.tab.kind();
-            }
-            None => {
-                q.scope_repo = None;
-                q.scope_kind = None;
-            }
+        if scope.tab == RepoTab::Actions {
+            self.items.clear();
+            self.runs = scope.runs.clone();
+            self.flat = (0..self.runs.len()).map(FlatRow::Run).collect();
+            let idx = keep_run
+                .and_then(|id| self.runs.iter().position(|r| r.github_id == id))
+                .unwrap_or(0);
+            self.select_abs(idx);
+            return;
         }
-        q
+
+        self.runs.clear();
+        let needle = self.query.search.trim().to_lowercase();
+        let mut items: Vec<ItemRow> = scope
+            .tab_items()
+            .iter()
+            .map(|it| it.to_row(&me))
+            .filter(|row| matches_search(row, &needle))
+            .collect();
+        // GitHub gave us newest-updated first; keep drafts below live PRs.
+        items.sort_by_key(|i| i.draft);
+        self.items = items;
+        self.rebuild_flat();
+        let idx = keep
+            .and_then(|number| {
+                self.flat.iter().position(|row| {
+                    matches!(row, FlatRow::Item(i) if self.items.get(*i).is_some_and(|it| it.number == number))
+                })
+            })
+            .unwrap_or(0);
+        self.select_abs(idx);
     }
 
     /// Name of the list on screen: a repo tab when scoped, else the view.
@@ -647,6 +790,13 @@ impl App {
     }
 
     fn toggle_read(&mut self) {
+        if self.scope.is_some() {
+            self.set_status(
+                StatusKind::Info,
+                "read state is local-cache only — this list is live from GitHub",
+            );
+            return;
+        }
         if let Some(n) = self.selected_inbox().cloned() {
             let next = !n.unread;
             if let Err(e) = self.db.set_notif_unread(&n.github_id, next) {
@@ -749,7 +899,7 @@ impl App {
                 owner: n.owner.clone(),
                 repo: n.repo.clone(),
                 number,
-                item_id,
+                item_id: Some(item_id),
             });
             self.set_status(StatusKind::Info, "loading comments");
             return;
@@ -764,11 +914,12 @@ impl App {
                 owner,
                 repo,
                 number: link.number,
-                item_id,
+                item_id: Some(item_id),
             });
             self.set_status(StatusKind::Info, "loading comments");
             return;
         }
+        let scoped = self.scope.is_some();
         let Some(item) = self.current_item() else {
             return;
         };
@@ -776,7 +927,9 @@ impl App {
             owner: item.owner.clone(),
             repo: item.repo.clone(),
             number: item.number,
-            item_id: item.id,
+            // In a repo scope the item has no database row, so the comments
+            // come back in an event instead of being cached.
+            item_id: (!scoped).then_some(item.id),
         });
         self.set_status(StatusKind::Info, "loading comments");
     }
@@ -814,15 +967,13 @@ impl App {
             self.set_status(StatusKind::Warn, "offline / no token");
             return;
         }
-        if self
-            .scope
-            .as_ref()
-            .is_some_and(|s| s.tab == RepoTab::Actions)
-        {
-            self.request_runs(true);
+        // In a repo, "this item" means the repo: refetch all three tabs.
+        if self.scope.is_some() {
+            self.fetch_scope();
+            self.set_status(StatusKind::Info, "refetching this repo");
             return;
         }
-        if self.query.view == View::MyRepos && self.scope.is_none() {
+        if self.query.view == View::MyRepos {
             self.request_owned_repos(true);
             return;
         }
@@ -975,18 +1126,10 @@ impl App {
     }
 
     fn reload(&mut self) {
-        if self
-            .scope
-            .as_ref()
-            .is_some_and(|s| s.tab == RepoTab::Actions)
-        {
-            let keep = self.selected_run().map(|r| r.github_id);
-            self.reload_runs(keep);
-            return;
-        }
+        // A repo scope is served entirely from memory; the cache is not
+        // consulted and background syncs must not disturb it.
         if self.scope.is_some() {
-            let keep = self.current_item().map(|i| i.id);
-            self.reload_keep(keep.unwrap_or(-1));
+            self.rebuild_scope();
             return;
         }
         match self.query.view {
@@ -1057,37 +1200,11 @@ impl App {
         self.select_abs(idx);
     }
 
-    fn reload_runs(&mut self, keep: Option<i64>) {
-        let Some((owner, repo)) = self
-            .scope
-            .as_ref()
-            .map(|s| (s.owner.clone(), s.repo.clone()))
-        else {
-            return;
-        };
-        match self.db.list_workflow_runs(&owner, &repo) {
-            Ok(rows) => self.runs = rows,
-            Err(e) => {
-                self.set_status(StatusKind::Err, format!("db: {e}"));
-                return;
-            }
-        }
-        self.items.clear();
-        self.inbox.clear();
-        self.repos.clear();
-        self.flat = (0..self.runs.len()).map(FlatRow::Run).collect();
-        self.refresh_counts();
-        let idx = keep
-            .and_then(|id| self.runs.iter().position(|r| r.github_id == id))
-            .unwrap_or(0);
-        self.select_abs(idx);
-    }
-
     fn reload_keep(&mut self, keep_id: i64) {
         self.inbox.clear();
         self.repos.clear();
         self.runs.clear();
-        match self.db.list(&self.effective_query()) {
+        match self.db.list(&self.query) {
             Ok(items) => self.items = items,
             Err(e) => {
                 self.set_status(StatusKind::Err, format!("db: {e}"));
@@ -1104,38 +1221,39 @@ impl App {
         self.select_abs(idx);
     }
 
-    /// Tab-bar badges: the main views, or the open repo's three tabs.
+    /// Main tab-bar badges. The repo bar reads its counts straight off the
+    /// open [`Scope`].
     fn refresh_counts(&mut self) {
-        let Some(scope) = self.scope.clone() else {
-            match self.db.counts_by_view(&self.query) {
-                Ok(c) => self.counts = c,
-                Err(e) => self.set_status(StatusKind::Warn, format!("counts: {e}")),
-            }
+        if self.scope.is_some() {
             return;
-        };
-        let mut out = Vec::with_capacity(RepoTab::ALL.len());
-        for tab in RepoTab::ALL {
-            let count = match tab.kind() {
-                Some(kind) => {
-                    let mut q = self.query.clone();
-                    q.scope_repo = Some(scope.full_name());
-                    q.scope_kind = Some(kind);
-                    self.db.count(&q)
-                }
-                None => self.db.count_workflow_runs(&scope.owner, &scope.repo),
-            };
-            match count {
-                Ok(n) => out.push((tab, n)),
-                Err(e) => {
-                    self.set_status(StatusKind::Warn, format!("counts: {e}"));
-                    return;
-                }
-            }
         }
-        self.scope_counts = out;
+        match self.db.counts_by_view(&self.query) {
+            Ok(c) => self.counts = c,
+            Err(e) => self.set_status(StatusKind::Warn, format!("counts: {e}")),
+        }
     }
 
     fn load_detail(&mut self) {
+        // Scoped rows are not in the database; build the preview from the
+        // fetched item instead.
+        if let Some(scope) = self.scope.as_ref() {
+            let me = self.me();
+            self.detail = match self.flat.get(self.selected) {
+                Some(FlatRow::Item(i)) => self.items.get(*i).and_then(|row| {
+                    scope
+                        .tab_items()
+                        .iter()
+                        .find(|it| it.number == row.number)
+                        .map(|it| {
+                            let comments =
+                                scope.comments.get(&it.number).cloned().unwrap_or_default();
+                            it.to_detail(&me, comments)
+                        })
+                }),
+                _ => None,
+            };
+            return;
+        }
         let id = match self.flat.get(self.selected) {
             Some(FlatRow::Item(i)) => self.items.get(*i).map(|it| it.id),
             Some(FlatRow::Child { parent, link }) => self
@@ -1175,6 +1293,20 @@ impl App {
     }
 }
 
+/// In-memory equivalent of the `/` filter the database applies: title,
+/// number, or author.
+fn matches_search(row: &ItemRow, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    row.title.to_lowercase().contains(needle)
+        || row.number.to_string().contains(needle)
+        || row
+            .author
+            .as_deref()
+            .is_some_and(|a| a.to_lowercase().contains(needle))
+}
+
 fn split_repo(repo: &str) -> (String, String) {
     match repo.split_once('/') {
         Some((o, n)) => (o.to_string(), n.to_string()),
@@ -1190,6 +1322,7 @@ fn kind_label(k: SyncKind) -> &'static str {
         SyncKind::Comments => "comments",
         SyncKind::Actions => "actions",
         SyncKind::OwnedRepos => "repos",
+        SyncKind::RepoBrowse => "repo",
     }
 }
 
@@ -1375,50 +1508,188 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.scope.as_ref().unwrap().full_name(), "acme/busy");
-        assert_eq!(app.items.len(), 2, "the scope still reads the cache");
 
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.query.view, View::MyRepos, "not back to Seen Repos");
         assert_eq!(app.selected_repo().unwrap().full_name(), "acme/busy");
     }
 
+    /// Payload a fetch would deliver: one open PR and one open issue, with
+    /// GitHub reporting more of each than were returned.
+    fn browse_payload() -> crate::github::RepoBrowse {
+        crate::github::RepoBrowse {
+            prs: vec![item("busy", 91, Kind::Pr, ItemState::Open)],
+            issues: vec![item("busy", 92, Kind::Issue, ItemState::Open)],
+            open_prs: 83,
+            open_issues: 5,
+        }
+    }
+
+    fn run(id: i64, number: i64) -> RunRow {
+        RunRow {
+            github_id: id,
+            owner: "acme".into(),
+            repo: "busy".into(),
+            name: "ci".into(),
+            title: "build".into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            event: "push".into(),
+            branch: "main".into(),
+            run_number: number,
+            actor: Some("me".into()),
+            html_url: Some("https://example.invalid/run".into()),
+            created_at: Some("2026-09-01T00:00:00Z".into()),
+            updated_at: None,
+        }
+    }
+
+    fn deliver_browse(app: &mut App) {
+        app.on_sync(SyncEvent::RepoItems {
+            owner: "acme".into(),
+            repo: "busy".into(),
+            browse: Box::new(browse_payload()),
+        });
+        app.on_sync(SyncEvent::RepoRuns {
+            owner: "acme".into(),
+            repo: "busy".into(),
+            runs: vec![run(7, 12)],
+        });
+    }
+
+    /// Entering a repo asks GitHub for its PRs, issues and runs, and shows
+    /// what comes back — never the cache, which holds different items.
     #[test]
-    fn enter_scopes_a_repo_and_escape_restores_the_bar() {
-        let (mut app, _rx) = seeded_app();
+    fn enter_fetches_the_repo_and_shows_the_payload() {
+        let (mut app, mut rx) = seeded_app();
 
         press(&mut app, KeyCode::Enter);
-        let scope = app.scope.clone().expect("enter opens the repo");
-        assert_eq!(scope.full_name(), "acme/busy");
-        assert_eq!(scope.tab, RepoTab::Prs);
-        assert_eq!(app.items.len(), 2, "only that repo's PRs");
+        assert_eq!(app.scope.as_ref().unwrap().full_name(), "acme/busy");
+        assert_eq!(app.scope.as_ref().unwrap().tab, RepoTab::Prs);
         assert!(
-            app.items
-                .iter()
-                .all(|i| i.repo == "busy" && i.kind == Kind::Pr)
+            matches!(rx.try_recv(), Ok(SyncCmd::RepoBrowse { owner, repo }) if owner == "acme" && repo == "busy")
         );
-        assert_eq!(app.list_name(), "PRs");
-        assert_eq!(
-            app.scope_counts,
-            vec![
-                (RepoTab::Prs, 2),
-                (RepoTab::Issues, 1),
-                (RepoTab::Actions, 0)
-            ]
+        assert!(matches!(rx.try_recv(), Ok(SyncCmd::Actions { .. })));
+        assert!(app.scope.as_ref().unwrap().loading());
+        assert!(
+            app.items.is_empty() && app.flat.is_empty(),
+            "nothing is shown from the cache while the fetch is in flight"
         );
 
-        press(&mut app, KeyCode::Char('l'));
-        assert_eq!(app.scope.as_ref().unwrap().tab, RepoTab::Issues);
+        deliver_browse(&mut app);
+        assert!(!app.scope.as_ref().unwrap().loading());
         assert_eq!(app.items.len(), 1);
-        assert_eq!(app.items[0].number, 3);
-
-        press(&mut app, KeyCode::Esc);
-        assert!(app.scope.is_none(), "esc leaves the repo");
-        assert_eq!(app.query.view, View::SeenRepos);
-        assert_eq!(app.flat.len(), 2);
         assert_eq!(
-            app.selected_repo().unwrap().full_name(),
-            "acme/busy",
-            "the repo we came from stays selected"
+            app.items[0].number, 91,
+            "the fetched PR, not the cached 1/2"
+        );
+        assert_eq!(app.items[0].id, 0, "live rows have no database id");
+        assert_eq!(
+            app.scope.as_ref().unwrap().tab_total(RepoTab::Prs),
+            83,
+            "the bar shows GitHub's total, not the fetched slice"
+        );
+
+        press(&mut app, KeyCode::Char('l')); // PRs -> Issues
+        assert_eq!(app.items.len(), 1);
+        assert_eq!(app.items[0].number, 92);
+        assert_eq!(app.scope.as_ref().unwrap().tab_total(RepoTab::Issues), 5);
+        assert!(
+            rx.try_recv().is_err(),
+            "switching tabs uses the payload already fetched"
+        );
+
+        press(&mut app, KeyCode::Char('l')); // Issues -> Actions
+        assert_eq!(app.scope.as_ref().unwrap().tab, RepoTab::Actions);
+        assert_eq!(app.selected_run().unwrap().run_number, 12);
+        assert!(app.items.is_empty(), "the item table is not drawn here");
+        assert_eq!(
+            app.selected_url().as_deref(),
+            Some("https://example.invalid/run")
+        );
+    }
+
+    /// Nothing is kept: leaving and re-entering fetches again.
+    #[test]
+    fn re_entering_a_repo_refetches() {
+        let (mut app, mut rx) = seeded_app();
+        press(&mut app, KeyCode::Enter);
+        deliver_browse(&mut app);
+        while rx.try_recv().is_ok() {}
+        press(&mut app, KeyCode::Esc);
+
+        press(&mut app, KeyCode::Enter);
+        let scope = app.scope.as_ref().unwrap();
+        assert!(
+            scope.prs.is_empty() && scope.runs.is_empty(),
+            "no leftovers"
+        );
+        assert!(scope.loading());
+        assert!(matches!(rx.try_recv(), Ok(SyncCmd::RepoBrowse { .. })));
+        assert!(matches!(rx.try_recv(), Ok(SyncCmd::Actions { .. })));
+
+        // r -> "this item" refetches the open repo.
+        deliver_browse(&mut app);
+        while rx.try_recv().is_ok() {}
+        app.refresh_selected();
+        assert!(app.scope.as_ref().unwrap().loading());
+        assert!(matches!(rx.try_recv(), Ok(SyncCmd::RepoBrowse { .. })));
+        assert!(matches!(rx.try_recv(), Ok(SyncCmd::Actions { .. })));
+    }
+
+    #[test]
+    fn a_payload_for_another_repo_is_ignored() {
+        let (mut app, _rx) = seeded_app();
+        press(&mut app, KeyCode::Enter);
+        app.on_sync(SyncEvent::RepoItems {
+            owner: "acme".into(),
+            repo: "quiet".into(),
+            browse: Box::new(browse_payload()),
+        });
+        let scope = app.scope.as_ref().unwrap();
+        assert!(scope.prs.is_empty(), "stale fetch for a repo we left");
+        assert!(scope.loading());
+    }
+
+    /// `c` cannot cache into a row that does not exist, so the comments come
+    /// back in an event and land in the preview.
+    #[test]
+    fn comments_in_a_scope_are_not_cached() {
+        let (mut app, mut rx) = seeded_app();
+        press(&mut app, KeyCode::Enter);
+        deliver_browse(&mut app);
+        while rx.try_recv().is_ok() {}
+
+        press(&mut app, KeyCode::Char('c'));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SyncCmd::Comments {
+                number: 91,
+                item_id: None,
+                ..
+            })
+        ));
+
+        app.on_sync(SyncEvent::RepoComments {
+            owner: "acme".into(),
+            repo: "busy".into(),
+            number: 91,
+            comments: vec![Comment {
+                github_id: Some(1),
+                kind: "issue_comment".into(),
+                author: "octo".into(),
+                body: "looks good".into(),
+                created_at: None,
+            }],
+        });
+        let detail = app.detail.as_ref().expect("preview built from the fetch");
+        assert_eq!(detail.row.number, 91);
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.comments[0].author, "octo");
+        assert_eq!(
+            app.db.get_detail(1).unwrap().map(|d| d.comments.len()),
+            Some(0),
+            "nothing was written to the cache"
         );
     }
 
@@ -1426,6 +1697,7 @@ mod tests {
     fn escape_closes_the_preview_before_leaving_the_repo() {
         let (mut app, _rx) = seeded_app();
         press(&mut app, KeyCode::Enter);
+        deliver_browse(&mut app);
         press(&mut app, KeyCode::Char('i'));
         assert!(app.preview_open);
 
@@ -1435,55 +1707,59 @@ mod tests {
 
         press(&mut app, KeyCode::Esc);
         assert!(app.scope.is_none());
+        assert_eq!(app.query.view, View::SeenRepos);
+        assert_eq!(
+            app.selected_repo().unwrap().full_name(),
+            "acme/busy",
+            "the repo we came from stays selected"
+        );
     }
 
-    #[test]
-    fn actions_tab_reads_cached_runs() {
-        let (mut app, _rx) = seeded_app();
-        app.db
-            .replace_workflow_runs(
-                "acme",
-                "busy",
-                &[RunRow {
-                    github_id: 7,
-                    owner: "acme".into(),
-                    repo: "busy".into(),
-                    name: "ci".into(),
-                    title: "build".into(),
-                    status: "completed".into(),
-                    conclusion: Some("success".into()),
-                    event: "push".into(),
-                    branch: "main".into(),
-                    run_number: 12,
-                    actor: Some("me".into()),
-                    html_url: Some("https://example.invalid/run".into()),
-                    created_at: Some("2026-09-01T00:00:00Z".into()),
-                    updated_at: None,
-                }],
-            )
-            .unwrap();
-
-        press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Char('h')); // PRs -> Actions
-        assert_eq!(app.scope.as_ref().unwrap().tab, RepoTab::Actions);
-        assert_eq!(app.flat.len(), 1);
-        assert_eq!(app.selected_run().unwrap().run_number, 12);
-        assert_eq!(
-            app.selected_url().as_deref(),
-            Some("https://example.invalid/run")
-        );
-        assert!(app.items.is_empty(), "the item table is not drawn here");
+    /// `/` opens with the active filter pre-filled for editing, so clear it
+    /// the way a user would before typing the new one.
+    fn filter(app: &mut App, text: &str) {
+        press(app, KeyCode::Char('/'));
+        for _ in 0..64 {
+            press(app, KeyCode::Backspace);
+        }
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+        press(app, KeyCode::Enter);
     }
 
     #[test]
     fn filter_applies_to_the_repo_list() {
         let (mut app, _rx) = seeded_app();
-        press(&mut app, KeyCode::Char('/'));
-        for c in "quiet".chars() {
-            press(&mut app, KeyCode::Char(c));
-        }
-        press(&mut app, KeyCode::Enter);
+        filter(&mut app, "quiet");
         assert_eq!(app.flat.len(), 1);
         assert_eq!(app.selected_repo().unwrap().full_name(), "acme/quiet");
+    }
+
+    /// The filter that picked the repo is parked on the way in — it would
+    /// otherwise hide everything in the repo — and restored on the way out.
+    /// Inside, `/` filters the fetched items.
+    #[test]
+    fn the_repo_list_filter_does_not_leak_into_the_repo() {
+        let (mut app, _rx) = seeded_app();
+        filter(&mut app, "busy");
+        assert_eq!(app.flat.len(), 1);
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.query.search.is_empty(), "parked on enter");
+        deliver_browse(&mut app);
+        assert_eq!(app.items.len(), 1, "the fetched PR is not hidden");
+
+        filter(&mut app, "nothing matches this");
+        assert!(app.items.is_empty(), "`/` filters the live list");
+        filter(&mut app, "91");
+        assert_eq!(app.items.len(), 1, "matches on number");
+        filter(&mut app, "me");
+        assert_eq!(app.items.len(), 1, "matches on author");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.query.search, "busy", "the repo-list filter is back");
+        assert_eq!(app.flat.len(), 1);
+        assert_eq!(app.selected_repo().unwrap().full_name(), "acme/busy");
     }
 }

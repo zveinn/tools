@@ -96,10 +96,28 @@ repo: its name on the far left, then its own `PRs`, `Issues`, and `Actions`
 tabs. `h` / `l` moves between those three, `esc` goes back to the menu you came
 from with that repo still selected.
 
-`PRs` and `Issues` list everything cached for that repo — open first, then
-closed and merged — regardless of how you are involved. `Actions` lists the 30
-most recent workflow runs, fetched from GitHub the first time you open the tab
-(`r` → *this item* refetches) and cached locally after that.
+### Inside a repo
+
+Opening a repo fetches it from GitHub — **nothing here is cached**. One GraphQL
+call brings back the open PRs and issues by *everyone*, not just the ones you
+are involved in, and one REST call brings the 30 latest workflow runs. Leaving
+the repo throws it all away, so re-entering shows the repository as it is at
+that moment. `r` → *this item* refetches without leaving.
+
+The repo bar shows GitHub's open totals. The lists hold the 50 most recently
+updated of each and the title says `of N` when there are more — a busy repo
+with 83 open PRs reads `PRs  1/50 of 83`.
+
+Because these rows are not in the cache:
+
+- the `role` column becomes `author`, which is what tells other people's work
+  apart (your own roles and the review breakdown are in the preview, `i`)
+- `c` fetches comments into the preview without storing them
+- `m` has nothing to mark read
+
+A repo-list filter is parked on the way in — it picked the repo, so it would
+only hide the repo's contents — and restored on the way out. `/` inside a repo
+filters the fetched items by title, number, or author.
 
 | Key | Action |
 |-----|--------|

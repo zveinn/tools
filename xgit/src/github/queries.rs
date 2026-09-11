@@ -185,6 +185,62 @@ fragment Item on IssueOrPullRequest {
 }
 "#;
 
+/// Lean per-repo shape for the live repo browser: enough for the list rows
+/// and the preview, without the timeline and comment-body walks that make
+/// [`ITEM_FRAGMENTS`] too heavy to ask for 50 at a time (GitHub 502s).
+pub const REPO_BROWSE: &str = r#"
+fragment RepoPr on PullRequest {
+  __typename
+  id number title body state merged mergedAt isDraft url
+  createdAt updatedAt closedAt
+  additions deletions changedFiles reviewDecision
+  author { login }
+  comments { totalCount }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 10) { nodes { name color } }
+  reviewRequests(first: 20) {
+    nodes { requestedReviewer { __typename ... on User { login } } }
+  }
+  latestReviews(first: 20) {
+    nodes { databaseId author { login } state submittedAt body }
+  }
+  repository { owner { login } name }
+}
+
+fragment RepoIssue on Issue {
+  __typename
+  id number title body state url
+  createdAt updatedAt closedAt
+  author { login }
+  comments { totalCount }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 10) { nodes { name color } }
+  repository { owner { login } name }
+}
+
+query RepoBrowse($owner: String!, $name: String!, $n: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: $n
+      states: OPEN
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      totalCount
+      nodes { ...RepoPr }
+    }
+    issues(
+      first: $n
+      states: OPEN
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      totalCount
+      nodes { ...RepoIssue }
+    }
+  }
+  rateLimit { cost remaining resetAt limit }
+}
+"#;
+
 pub const VIEWER: &str = r#"
 query Viewer {
   viewer { login }

@@ -155,12 +155,7 @@ fn draw_repo_bar(frame: &mut Frame, app: &App, area: Rect, scope: &Scope) {
         Span::raw("  "),
     ];
     for tab in RepoTab::ALL {
-        let count = app
-            .scope_counts
-            .iter()
-            .find(|(t, _)| *t == tab)
-            .map(|(_, n)| *n)
-            .unwrap_or(0);
+        let count = scope.tab_total(tab);
         let selected = scope.tab == tab;
         let label = if compact {
             format!(" {} {count} ", tab.name())
@@ -227,10 +222,23 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.selected + 1
     };
+    // A repo tab shows GitHub's open total next to the fetched slice.
+    let truncated = app
+        .scope
+        .as_ref()
+        .map(|s| s.tab_total(s.tab))
+        .filter(|total| *total > app.flat.len())
+        .map(|total| format!(" of {total}"))
+        .unwrap_or_default();
     let title = if app.mode == Mode::Filter {
         format!("  /{}▌ ", app.filter_buf)
     } else {
-        format!(" {}  {}/{} ", app.list_name(), pos, app.flat.len())
+        format!(
+            " {}  {}/{}{truncated} ",
+            app.list_name(),
+            pos,
+            app.flat.len()
+        )
     };
     let block = pane(focused).title(Span::styled(title, Style::new().fg(Theme::MUTED)));
 
@@ -240,12 +248,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .is_some_and(|s| s.tab == RepoTab::Actions);
 
     if app.flat.is_empty() {
-        let empty = if !app.cfg.has_token() {
+        let empty = if app.scope.as_ref().is_some_and(|s| s.loading()) {
+            "fetching from GitHub…"
+        } else if !app.cfg.has_token() {
             "No local data. Set GITHUB_TOKEN and press R."
         } else if actions_tab {
             "No workflow runs.  r sync → this item refetches"
         } else if app.scope.is_some() {
-            "Nothing cached for this repo.  h/l tabs   esc back"
+            "Nothing open in this repo.  h/l tabs   esc back"
         } else if app.query.view == View::MyRepos {
             "No repos fetched yet.  r sync → this item retries"
         } else if app.query.view == View::SeenRepos {
@@ -320,7 +330,9 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         ];
         let mut header_cells = vec![
             Cell::from(""),
-            Cell::from("role").style(header_style),
+            // A repo browser lists everyone's work, so the author is what
+            // tells the rows apart — your own role is in the preview.
+            Cell::from(if scoped { "author" } else { "role" }).style(header_style),
             Cell::from("state").style(header_style),
             Cell::from(repo_header).style(header_style),
             Cell::from("title").style(header_style),
@@ -747,9 +759,15 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool, scoped: bool) -> R
         ])
         .height(1);
     }
+    let who = if scoped {
+        Cell::from(truncate_width(item.author.as_deref().unwrap_or("—"), 10))
+            .style(Style::new().fg(Theme::GREEN))
+    } else {
+        Cell::from(role_label(role)).style(Style::new().fg(role_color(role)))
+    };
     let mut cells = vec![
         unread,
-        Cell::from(role_label(role)).style(Style::new().fg(role_color(role))),
+        who,
         Cell::from(state_text).style(Style::new().fg(state_fg)),
         Cell::from(ident).style(Style::new().fg(Color::White)),
         Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
@@ -1359,7 +1377,15 @@ Repos
   repo-wide totals and is fetched when the tab opens.
   open PRs counts human authors only; deps is Dependabot's, and repos
   sort on the human count so dependency bumps cannot bury real work.
-  Actions runs load when the tab opens (r -> this item refetches).
+
+Inside a repo
+  Everything is fetched from GitHub on enter and never cached: the open
+  PRs and issues by everyone, plus the 30 latest workflow runs. The bar
+  shows GitHub's totals; the list holds the 50 most recently updated of
+  each, and says `of N` when there are more.
+  r -> this item   refetch the whole repo
+  c                fetch comments for the selected item
+  m                nothing to mark — this list is not in the cache
 
 Movement
   h/l           previous / next view
@@ -1382,7 +1408,8 @@ Keys
   r             sync menu (this item / last 7–90d / all)
   q             quit
 ";
-    let popup = centered(area, 66, 41);
+    // Widest line is 74 columns, plus the border and padding.
+    let popup = centered(area, 79, 53);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text)

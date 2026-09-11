@@ -248,6 +248,53 @@ impl HydratedItem {
         format!("{}/{}#{}", self.owner, self.repo, self.number)
     }
 
+    /// List row for an item that was never written to the database, so it has
+    /// no local id and no local read state.
+    pub fn to_row(&self, me: &str) -> ItemRow {
+        let (approvals, review_total) = review_progress(&self.reviews, &self.review_requests);
+        ItemRow {
+            id: 0,
+            owner: self.owner.clone(),
+            repo: self.repo.clone(),
+            number: self.number,
+            kind: self.kind,
+            title: self.title.clone(),
+            state: self.state,
+            author: self.author.clone(),
+            draft: self.draft,
+            html_url: Some(self.html_url.clone()),
+            updated_at: self.updated_at.clone(),
+            review_decision: self.review_decision.clone(),
+            additions: self.additions,
+            deletions: self.deletions,
+            unread: false,
+            roles: self.field_roles(me),
+            approvals,
+            review_total,
+            links: self.links.clone(),
+        }
+    }
+
+    /// Preview pane contents, straight from the fetch. `comments` are loaded
+    /// separately, on demand.
+    pub fn to_detail(&self, me: &str, comments: Vec<Comment>) -> ItemDetail {
+        ItemDetail {
+            row: self.to_row(me),
+            body: self.body.clone(),
+            created_at: self.created_at.clone(),
+            closed_at: self.closed_at.clone(),
+            merged_at: self.merged_at.clone(),
+            comments_count: self.comments_count,
+            changed_files: self.changed_files,
+            labels: self.labels.clone(),
+            assignees: self.assignees.clone(),
+            reviews: self.reviews.clone(),
+            comments,
+            links: self.links.clone(),
+            comments_fetched_at: None,
+        }
+    }
+
     /// Roles we can prove from the object itself (authoritative on a full hydrate).
     pub fn field_roles(&self, me: &str) -> BTreeSet<Role> {
         let mut roles = BTreeSet::new();
@@ -484,8 +531,9 @@ impl RepoRow {
 }
 
 /// Sub-views of a single repository, shown in the repo bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepoTab {
+    #[default]
     Prs,
     Issues,
     Actions,

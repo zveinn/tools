@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::model::{
     Comment, HydratedItem, InboxRow, IssueLink, ItemDetail, ItemQuery, ItemRow, ItemState, Kind,
-    Label, LinkKind, RepoRow, Review, Role, RunRow, StateFilter, View, review_progress,
+    Label, LinkKind, RepoRow, Review, Role, StateFilter, View, review_progress,
 };
 use crate::timeutil::now_rfc3339;
 
@@ -708,88 +708,6 @@ impl Db {
         })
     }
 
-    pub fn replace_workflow_runs(&self, owner: &str, repo: &str, runs: &[RunRow]) -> Result<()> {
-        self.with(|c| {
-            let tx = c.unchecked_transaction()?;
-            tx.execute(
-                "DELETE FROM workflow_runs WHERE owner = ?1 AND repo = ?2",
-                params![owner, repo],
-            )?;
-            for run in runs {
-                tx.execute(
-                    "INSERT OR REPLACE INTO workflow_runs(
-                        github_id, owner, repo, name, title, status, conclusion, event,
-                        branch, run_number, actor, html_url, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                    params![
-                        run.github_id,
-                        owner,
-                        repo,
-                        run.name,
-                        run.title,
-                        run.status,
-                        run.conclusion,
-                        run.event,
-                        run.branch,
-                        run.run_number,
-                        run.actor,
-                        run.html_url,
-                        run.created_at,
-                        run.updated_at,
-                    ],
-                )?;
-            }
-            tx.commit()?;
-            Ok(())
-        })
-    }
-
-    pub fn count_workflow_runs(&self, owner: &str, repo: &str) -> Result<usize> {
-        self.with(|c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM workflow_runs WHERE owner = ?1 AND repo = ?2",
-                params![owner, repo],
-                |r| r.get(0),
-            )?;
-            Ok(n as usize)
-        })
-    }
-
-    pub fn list_workflow_runs(&self, owner: &str, repo: &str) -> Result<Vec<RunRow>> {
-        self.with(|c| {
-            let mut stmt = c.prepare(
-                "SELECT github_id, owner, repo, name, title, status, conclusion, event,
-                        branch, run_number, actor, html_url, created_at, updated_at
-                 FROM workflow_runs
-                 WHERE owner = ?1 AND repo = ?2
-                 ORDER BY created_at DESC, run_number DESC",
-            )?;
-            let rows = stmt.query_map(params![owner, repo], |r| {
-                Ok(RunRow {
-                    github_id: r.get(0)?,
-                    owner: r.get(1)?,
-                    repo: r.get(2)?,
-                    name: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    status: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                    conclusion: r.get(6)?,
-                    event: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                    branch: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                    run_number: r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-                    actor: r.get(10)?,
-                    html_url: r.get(11)?,
-                    created_at: r.get(12)?,
-                    updated_at: r.get(13)?,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
-        })
-    }
-
     pub fn get_detail(&self, id: i64) -> Result<Option<ItemDetail>> {
         self.with(|c| {
             let row = c
@@ -1046,6 +964,9 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
 
 fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "owned_repos", "bot_prs", "INTEGER NOT NULL DEFAULT 0")?;
+    // The repo browser fetches workflow runs live now; an older xgit cached
+    // them in a table that no longer has a reader.
+    conn.execute_batch("DROP TABLE IF EXISTS workflow_runs")?;
     let version = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -2011,38 +1932,5 @@ mod tests {
         db.replace_owned_repos(&[owned("two", 12, 0)]).unwrap();
         let rows = db.list_owned_repos(&q).unwrap();
         assert_eq!(rows.len(), 1, "a refetch replaces the whole list");
-    }
-
-    #[test]
-    fn workflow_runs_replace_per_repo() {
-        let db = Db::open(":memory:").unwrap();
-        let run = |id: i64, num: i64| RunRow {
-            github_id: id,
-            owner: "acme".into(),
-            repo: "box".into(),
-            name: "ci".into(),
-            title: format!("run {num}"),
-            status: "completed".into(),
-            conclusion: Some("success".into()),
-            event: "push".into(),
-            branch: "main".into(),
-            run_number: num,
-            actor: Some("me".into()),
-            html_url: Some(format!("https://github.com/acme/box/actions/runs/{id}")),
-            created_at: Some(format!("2026-09-0{num}T00:00:00Z")),
-            updated_at: None,
-        };
-        db.replace_workflow_runs("acme", "box", &[run(1, 1), run(2, 2)])
-            .unwrap();
-        let rows = db.list_workflow_runs("acme", "box").unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].run_number, 2, "newest first");
-
-        db.replace_workflow_runs("acme", "box", &[run(3, 3)])
-            .unwrap();
-        let rows = db.list_workflow_runs("acme", "box").unwrap();
-        assert_eq!(rows.len(), 1, "a refetch replaces the repo's runs");
-        assert_eq!(rows[0].github_id, 3);
-        assert!(db.list_workflow_runs("acme", "other").unwrap().is_empty());
     }
 }

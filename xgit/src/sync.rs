@@ -26,6 +26,7 @@ pub enum SyncKind {
     Comments,
     Actions,
     OwnedRepos,
+    RepoBrowse,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,24 @@ pub enum SyncEvent {
         remaining: Option<u32>,
         limit: Option<u32>,
     },
+    /// Live repo-browser payloads. These never touch the database — the TUI
+    /// holds them for as long as the repo is open and throws them away after.
+    RepoItems {
+        owner: String,
+        repo: String,
+        browse: Box<crate::github::RepoBrowse>,
+    },
+    RepoRuns {
+        owner: String,
+        repo: String,
+        runs: Vec<crate::model::RunRow>,
+    },
+    RepoComments {
+        owner: String,
+        repo: String,
+        number: i64,
+        comments: Vec<crate::model::Comment>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,14 +86,21 @@ pub enum SyncCmd {
         number: i64,
         item_id: i64,
     },
+    /// `item_id: None` means the caller is the live repo browser: return the
+    /// comments in an event instead of caching them.
     Comments {
         owner: String,
         repo: String,
         number: i64,
-        item_id: i64,
+        item_id: Option<i64>,
     },
     /// Latest Actions workflow runs for one repository.
     Actions {
+        owner: String,
+        repo: String,
+    },
+    /// Open PRs and issues of one repository, fetched fresh.
+    RepoBrowse {
         owner: String,
         repo: String,
     },
@@ -199,16 +225,30 @@ pub async fn run_worker(
                             },
                         );
                         match load_comments(&db, &client, &owner, &repo, number, item_id).await {
-                            Ok(n) => emit(
-                                &ev_tx,
-                                SyncEvent::Finished {
-                                    kind: SyncKind::Comments,
-                                    fetched: 1,
-                                    upserted: n,
-                                    unread: 0,
-                                    message: format!("{n} comments"),
-                                },
-                            ),
+                            Ok(comments) => {
+                                let n = comments.len() as u32;
+                                if item_id.is_none() {
+                                    emit(
+                                        &ev_tx,
+                                        SyncEvent::RepoComments {
+                                            owner: owner.clone(),
+                                            repo: repo.clone(),
+                                            number,
+                                            comments,
+                                        },
+                                    );
+                                }
+                                emit(
+                                    &ev_tx,
+                                    SyncEvent::Finished {
+                                        kind: SyncKind::Comments,
+                                        fetched: 1,
+                                        upserted: n,
+                                        unread: 0,
+                                        message: format!("{n} comments"),
+                                    },
+                                );
+                            }
                             Err(e) => emit(
                                 &ev_tx,
                                 SyncEvent::Failed {
@@ -218,6 +258,49 @@ pub async fn run_worker(
                             ),
                         }
                     }
+                    Some(SyncCmd::RepoBrowse { owner, repo }) => {
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::RepoBrowse,
+                                message: format!("browse {owner}/{repo}"),
+                            },
+                        );
+                        match client.repo_browse(&owner, &repo).await {
+                            Ok(browse) => {
+                                let message = format!(
+                                    "{} open PRs · {} open issues",
+                                    browse.open_prs, browse.open_issues
+                                );
+                                emit(
+                                    &ev_tx,
+                                    SyncEvent::RepoItems {
+                                        owner: owner.clone(),
+                                        repo: repo.clone(),
+                                        browse: Box::new(browse),
+                                    },
+                                );
+                                emit(
+                                    &ev_tx,
+                                    SyncEvent::Finished {
+                                        kind: SyncKind::RepoBrowse,
+                                        fetched: 1,
+                                        upserted: 0,
+                                        unread: 0,
+                                        message,
+                                    },
+                                );
+                            }
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::RepoBrowse,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                        emit_rate(&ev_tx, &client);
+                    }
                     Some(SyncCmd::Actions { owner, repo }) => {
                         emit(
                             &ev_tx,
@@ -226,17 +309,28 @@ pub async fn run_worker(
                                 message: format!("actions {owner}/{repo}"),
                             },
                         );
-                        match load_runs(&db, &client, &owner, &repo).await {
-                            Ok(n) => emit(
-                                &ev_tx,
-                                SyncEvent::Finished {
-                                    kind: SyncKind::Actions,
-                                    fetched: 1,
-                                    upserted: n,
-                                    unread: 0,
-                                    message: format!("{n} workflow runs"),
-                                },
-                            ),
+                        match client.workflow_runs(&owner, &repo, RUNS_PER_REPO).await {
+                            Ok(runs) => {
+                                let n = runs.len() as u32;
+                                emit(
+                                    &ev_tx,
+                                    SyncEvent::RepoRuns {
+                                        owner: owner.clone(),
+                                        repo: repo.clone(),
+                                        runs,
+                                    },
+                                );
+                                emit(
+                                    &ev_tx,
+                                    SyncEvent::Finished {
+                                        kind: SyncKind::Actions,
+                                        fetched: 1,
+                                        upserted: n,
+                                        unread: 0,
+                                        message: format!("{n} workflow runs"),
+                                    },
+                                );
+                            }
                             Err(e) => emit(
                                 &ev_tx,
                                 SyncEvent::Failed {
@@ -734,25 +828,21 @@ async fn load_owned_repos(db: &Db, client: &GhClient) -> Result<u32> {
     Ok(n)
 }
 
-async fn load_runs(db: &Db, client: &GhClient, owner: &str, repo: &str) -> Result<u32> {
-    let runs = client.workflow_runs(owner, repo, RUNS_PER_REPO).await?;
-    let n = runs.len() as u32;
-    db.replace_workflow_runs(owner, repo, &runs)?;
-    Ok(n)
-}
-
+/// Caches into `item_id` when there is one; the live repo browser passes
+/// `None` and gets the comments back in an event.
 async fn load_comments(
     db: &Db,
     client: &GhClient,
     owner: &str,
     repo: &str,
     number: i64,
-    item_id: i64,
-) -> Result<u32> {
+    item_id: Option<i64>,
+) -> Result<Vec<crate::model::Comment>> {
     let comments = client.comments(owner, repo, number).await?;
-    let n = comments.len() as u32;
-    db.replace_comments(item_id, &comments)?;
-    Ok(n)
+    if let Some(id) = item_id {
+        db.replace_comments(id, &comments)?;
+    }
+    Ok(comments)
 }
 
 fn persist(

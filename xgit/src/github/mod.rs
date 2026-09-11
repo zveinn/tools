@@ -17,6 +17,9 @@ pub use parse::comments_from_value;
 
 const USER_AGENT: &str = concat!("xgit/", env!("CARGO_PKG_VERSION"));
 const API_VERSION: &str = "2022-11-28";
+/// Open PRs and issues pulled per repo browse. 50 costs 3 rate-limit points;
+/// 100 makes GitHub 502.
+const REPO_BROWSE_LIMIT: usize = 50;
 /// 25 repos a page, so ~600 owned repos before the runaway guard trips.
 const OWNED_REPO_PAGES: usize = 24;
 /// Open PRs sampled per repo to split Dependabot out of the count. Matches
@@ -51,6 +54,16 @@ pub struct ItemRef {
     pub repo: String,
     pub number: i64,
     pub node_id: Option<String>,
+}
+
+/// One live look at a repository. `open_*` are GitHub's totals, which can
+/// exceed what `first:` returned.
+#[derive(Debug, Default, Clone)]
+pub struct RepoBrowse {
+    pub prs: Vec<HydratedItem>,
+    pub issues: Vec<HydratedItem>,
+    pub open_prs: usize,
+    pub open_issues: usize,
 }
 
 #[derive(Debug)]
@@ -335,6 +348,43 @@ impl GhClient {
             last_modified,
             poll_interval,
             not_modified: false,
+        })
+    }
+
+    /// The open PRs and issues of one repository, newest update first.
+    ///
+    /// Nothing here is written to the local cache — the repo browser always
+    /// shows what GitHub says right now.
+    pub async fn repo_browse(&self, owner: &str, repo: &str) -> Result<RepoBrowse> {
+        let data = self
+            .graphql(
+                queries::REPO_BROWSE,
+                json!({ "owner": owner, "name": repo, "n": REPO_BROWSE_LIMIT }),
+            )
+            .await
+            .with_context(|| format!("browse {owner}/{repo}"))?;
+        let repository = data
+            .get("repository")
+            .filter(|v| !v.is_null())
+            .with_context(|| format!("{owner}/{repo} not found"))?;
+        let nodes = |path: &str| {
+            repository
+                .pointer(path)
+                .and_then(Value::as_array)
+                .map(|ns| ns.iter().filter_map(parse::item_from_value).collect())
+                .unwrap_or_default()
+        };
+        let total = |path: &str| {
+            repository
+                .pointer(path)
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        };
+        Ok(RepoBrowse {
+            prs: nodes("/pullRequests/nodes"),
+            issues: nodes("/issues/nodes"),
+            open_prs: total("/pullRequests/totalCount"),
+            open_issues: total("/issues/totalCount"),
         })
     }
 
