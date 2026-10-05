@@ -76,7 +76,11 @@ pub fn connect() -> crate::Result<UnixStream> {
         } else {
             "start it with: xmux server  (or: sudo systemctl start xmux)"
         };
-        format!("cannot connect to server at {}: {e}\n{hint}", path.display()).into()
+        format!(
+            "cannot connect to server at {}: {e}\n{hint}",
+            path.display()
+        )
+        .into()
     })
 }
 

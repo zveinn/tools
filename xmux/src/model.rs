@@ -1,18 +1,20 @@
 //! The data model: sessions → tabs → panes, with each tab holding its
 //! panes in a binary split tree.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libghostty_vt::{
     Terminal, TerminalOptions,
     terminal::{
-        ClipboardLocation, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes,
-        DeviceType, PrimaryDeviceAttributes, SecondaryDeviceAttributes, SizeReportSize,
+        ClipboardLocation, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
+        PrimaryDeviceAttributes, SecondaryDeviceAttributes, SizeReportSize,
     },
 };
 
 use crate::Result;
+use crate::agent_status::{self, AgentActivity};
 use crate::config::Config;
 use crate::pty::Pty;
 
@@ -56,6 +58,11 @@ pub struct Pane {
     /// Command typed into the shell when this pane is restored after a
     /// server restart (set via the terminal-settings prompt).
     pub auto_run: Option<String>,
+    /// Latest agent activity taken from this pane's window title.
+    activity: Rc<Cell<Option<AgentActivity>>>,
+    /// Set when `activity` changes, so the server can redraw lists
+    /// without repainting on every spinner frame.
+    activity_changed: Rc<Cell<bool>>,
 }
 
 /// How a split divides a pane's rectangle.
@@ -160,11 +167,7 @@ impl Layout {
     }
 
     /// Visit every pane with its rectangle within `rect`.
-    pub fn for_each(
-        &self,
-        rect: Rect,
-        f: &mut dyn FnMut(&Pane, Rect) -> Result<()>,
-    ) -> Result<()> {
+    pub fn for_each(&self, rect: Rect, f: &mut dyn FnMut(&Pane, Rect) -> Result<()>) -> Result<()> {
         match self {
             Layout::Empty => Ok(()),
             Layout::Leaf(pane) => f(pane, rect),
@@ -210,9 +213,7 @@ impl Layout {
                 true
             }
             Layout::Leaf(_) => false,
-            Layout::Split { a, b, .. } => {
-                a.split_leaf(at, dir, new) || b.split_leaf(at, dir, new)
-            }
+            Layout::Split { a, b, .. } => a.split_leaf(at, dir, new) || b.split_leaf(at, dir, new),
         }
     }
 
@@ -333,13 +334,40 @@ impl Pane {
             Ok(())
         })?;
 
+        // Grok and Claude report working vs sitting-at-the-prompt by
+        // rewriting the window title. Copy the classification out here:
+        // `title()` is only borrowed until the next vt_write.
+        let activity = Rc::new(Cell::new(None));
+        let activity_changed = Rc::new(Cell::new(false));
+        let slot = Rc::clone(&activity);
+        let changed = Rc::clone(&activity_changed);
+        term.on_title_changed(move |term| {
+            let next = term.title().ok().and_then(agent_status::classify_title);
+            if slot.get() != next {
+                slot.set(next);
+                changed.set(true);
+            }
+        })?;
+
         Ok(Self {
             id: NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed),
             pty,
             term,
             clipboard,
             auto_run: None,
+            activity,
+            activity_changed,
         })
+    }
+
+    /// Agent activity last seen in this pane's window title.
+    pub fn agent_activity(&self) -> Option<AgentActivity> {
+        self.activity.get()
+    }
+
+    /// Whether the title's activity changed since the previous call.
+    pub fn take_activity_change(&self) -> bool {
+        self.activity_changed.replace(false)
     }
 
     pub fn resize(&mut self, size: (u16, u16)) -> Result<()> {
@@ -364,6 +392,17 @@ impl Tab {
 
     pub fn is_empty(&self) -> bool {
         matches!(self.layout, Layout::Empty)
+    }
+
+    /// Working if any pane is mid-turn, else idle if any pane has an
+    /// agent sitting at its prompt.
+    pub fn agent_activity(&self) -> Option<AgentActivity> {
+        agent_status::rollup(
+            self.layout
+                .panes()
+                .into_iter()
+                .map(|pane| pane.agent_activity()),
+        )
     }
 
     /// Resize every pane to its rectangle in the current layout — or,
@@ -575,6 +614,17 @@ impl Session {
             last_activity: std::time::Instant::now(),
             last_size: size,
         }
+    }
+
+    /// Working if any pane in any tab is mid-turn, else idle if any
+    /// pane has an agent at its prompt.
+    pub fn agent_activity(&self) -> Option<AgentActivity> {
+        agent_status::rollup(
+            self.tabs
+                .iter()
+                .flat_map(|tab| tab.layout.panes())
+                .map(|pane| pane.agent_activity()),
+        )
     }
 
     pub fn resize(&mut self, size: (u16, u16)) -> Result<()> {

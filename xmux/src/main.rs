@@ -16,6 +16,7 @@
 //! Ctrl+G detaches.
 
 mod agent;
+mod agent_status;
 mod client;
 mod config;
 mod input;
