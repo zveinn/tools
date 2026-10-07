@@ -23,8 +23,8 @@ use crate::config::{self, Config};
 use crate::input::{Mode, Overlay, SelectState, handle_input, manager_count, session_entries};
 use crate::model::Session;
 use crate::protocol::{
-    C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK,
-    S2C_BYE, S2C_LIST, S2C_OUTPUT, frame, socket_path,
+    C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK, S2C_BYE,
+    S2C_LIST, S2C_OUTPUT, frame, socket_path,
 };
 use crate::render::{ListItem, Renderer, content_size, draw_manager, draw_naming, draw_session};
 
@@ -376,6 +376,7 @@ pub fn run() -> Result<()> {
         // ---- Drain ptys into their pane terminals. ----
         let mut any_removed = false;
         let mut changed_sessions: Vec<u64> = Vec::new();
+        let mut activity_sessions: Vec<u64> = Vec::new();
         let mut clipboard_out: Vec<(u64, char, String)> = Vec::new();
         for (k, &(si, ti, pane_id)) in fd_map.iter().enumerate() {
             if !ready[k + 1 + client_count].0 {
@@ -391,8 +392,15 @@ pub fn run() -> Result<()> {
                     for (register, text) in pane.clipboard.borrow_mut().drain(..) {
                         clipboard_out.push((session_id, register, text));
                     }
+                    // A spinner frame is not a change; this fires on
+                    // working ↔ idle ↔ gone. Snapshot it before the
+                    // `sessions` borrow just below.
+                    let activity_changed = pane.take_activity_change();
                     if ti == sessions[si].active_tab && !changed_sessions.contains(&session_id) {
                         changed_sessions.push(session_id);
+                    }
+                    if activity_changed && !activity_sessions.contains(&session_id) {
+                        activity_sessions.push(session_id);
                     }
                 }
                 Err(_) => {
@@ -413,12 +421,29 @@ pub fn run() -> Result<()> {
             }
         }
 
-        // Redraw clients viewing sessions whose active tab produced output.
+        // Redraw clients viewing sessions whose active tab produced output,
+        // and anyone looking at a list whose agent marks just changed —
+        // including a background tab, which does not otherwise repaint.
         for client in &mut clients {
-            if let Some(id) = client.attached
-                && changed_sessions.contains(&id)
-                && matches!(client.mode, Mode::Running)
-            {
+            let output = client
+                .attached
+                .is_some_and(|id| changed_sessions.contains(&id))
+                && matches!(client.mode, Mode::Running);
+            let marks = match &client.mode {
+                Mode::Manager {
+                    overlay: Overlay::Sessions { .. },
+                    ..
+                } => !activity_sessions.is_empty(),
+                Mode::Manager {
+                    overlay: Overlay::Tabs,
+                    ..
+                }
+                | Mode::Running => client
+                    .attached
+                    .is_some_and(|id| activity_sessions.contains(&id)),
+                _ => false,
+            };
+            if output || marks {
                 client.needs_redraw = true;
                 client.skip_sync = false;
             }
@@ -552,6 +577,7 @@ pub fn run() -> Result<()> {
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for e in &entries {
+                            let activity = e.running.and_then(|esi| sessions[esi].agent_activity());
                             let label = match (*agents, e.running) {
                                 (true, Some(esi)) => format!(
                                     "{:<name_width$}  · {}",
@@ -560,12 +586,17 @@ pub fn run() -> Result<()> {
                                 ),
                                 _ => e.name.clone(),
                             };
-                            min_interior = min_interior.max(label.chars().count() + 2);
+                            min_interior = min_interior.max(
+                                label.chars().count()
+                                    + 2
+                                    + crate::agent_status::mark_columns(activity),
+                            );
                             if query.is_none_or(|q| crate::input::name_matches(&e.name, q)) {
                                 items.push(ListItem {
                                     label,
                                     active: e.running == Some(si),
                                     dim: e.running.is_none(),
+                                    agent: activity,
                                 });
                             }
                         }
@@ -602,12 +633,18 @@ pub fn run() -> Result<()> {
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for (ti, t) in session.tabs.iter().enumerate() {
-                            min_interior = min_interior.max(t.name.chars().count() + 2);
+                            let activity = t.agent_activity();
+                            min_interior = min_interior.max(
+                                t.name.chars().count()
+                                    + 2
+                                    + crate::agent_status::mark_columns(activity),
+                            );
                             if query.is_none_or(|q| crate::input::name_matches(&t.name, q)) {
                                 items.push(ListItem {
                                     label: t.name.clone(),
                                     active: ti == session.active_tab,
                                     dim: false,
+                                    agent: activity,
                                 });
                             }
                         }
@@ -660,7 +697,15 @@ pub fn run() -> Result<()> {
                     } else {
                         "enter create · esc cancel"
                     };
-                    draw_naming(&mut buf, title, &name.text, name.cursor, size, config.accent, footer)?;
+                    draw_naming(
+                        &mut buf,
+                        title,
+                        &name.text,
+                        name.cursor,
+                        size,
+                        config.accent,
+                        footer,
+                    )?;
                 }
             }
             clients[ci].send(S2C_OUTPUT, &buf);
@@ -851,7 +896,9 @@ fn handle_frame(
             clients[ci].skip_sync = false;
         }
         _ => {
-            eprintln!("dropping client after unknown frame kind {kind} (client newer than server?)");
+            eprintln!(
+                "dropping client after unknown frame kind {kind} (client newer than server?)"
+            );
             clients[ci].dead = true;
         }
     }
@@ -874,6 +921,12 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
         .map(|e| e.name.chars().count())
         .max()
         .unwrap_or(0);
+    // A status column only appears once some session actually has an
+    // agent, so a listing with none of them stays as it was.
+    let show_agents = entries.iter().any(|e| {
+        e.running
+            .is_some_and(|si| sessions[si].agent_activity().is_some())
+    });
 
     for entry in &entries {
         let write = (|| -> crate::Result<()> {
@@ -907,6 +960,30 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
                             SetAttribute(Attribute::Reset),
                             Print(&padded),
                         )?;
+                    }
+                    if show_agents {
+                        match session.agent_activity() {
+                            Some(crate::agent_status::AgentActivity::Working) => {
+                                queue!(
+                                    out,
+                                    Print("  "),
+                                    SetForegroundColor(config.accent),
+                                    Print("▶"),
+                                    SetForegroundColor(Color::Reset),
+                                )?;
+                            }
+                            Some(crate::agent_status::AgentActivity::Idle) => {
+                                queue!(
+                                    out,
+                                    SetAttribute(Attribute::Dim),
+                                    Print("  ✓"),
+                                    SetAttribute(Attribute::Reset),
+                                )?;
+                            }
+                            None => {
+                                queue!(out, Print("   "))?;
+                            }
+                        }
                     }
                     queue!(
                         out,
@@ -962,8 +1039,7 @@ fn osc52(text: &str) -> Vec<u8> {
 /// Like `osc52`, targeting a specific register ('c' clipboard, 'p'
 /// primary).
 fn osc52_to(register: char, text: &str) -> Vec<u8> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     // Terminals cap OSC payload sizes; clamp to something generous.
     let data = text.as_bytes();
     let data = &data[..data.len().min(512 * 1024)];
@@ -977,8 +1053,16 @@ fn osc52_to(register: char, text: &str) -> Vec<u8> {
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(TABLE[(n >> 18) as usize & 63]);
         out.push(TABLE[(n >> 12) as usize & 63]);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] } else { b'=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] } else { b'=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63]
+        } else {
+            b'='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63]
+        } else {
+            b'='
+        });
     }
     out.push(0x07);
     out
@@ -986,10 +1070,7 @@ fn osc52_to(register: char, text: &str) -> Vec<u8> {
 
 /// Clients whose session vanished (killed from a manager) fall back to
 /// the first surviving session, or get a goodbye when none remain.
-fn rehome_homeless_clients(
-    clients: &mut [ClientConn],
-    sessions: &mut [Session],
-) -> Result<()> {
+fn rehome_homeless_clients(clients: &mut [ClientConn], sessions: &mut [Session]) -> Result<()> {
     for ci in 0..clients.len() {
         if clients[ci].closing || clients[ci].dead {
             continue;

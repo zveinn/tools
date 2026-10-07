@@ -185,6 +185,62 @@ fragment Item on IssueOrPullRequest {
 }
 "#;
 
+/// Lean per-repo shape for the live repo browser: enough for the list rows
+/// and the preview, without the timeline and comment-body walks that make
+/// [`ITEM_FRAGMENTS`] too heavy to ask for 50 at a time (GitHub 502s).
+pub const REPO_BROWSE: &str = r#"
+fragment RepoPr on PullRequest {
+  __typename
+  id number title body state merged mergedAt isDraft url
+  createdAt updatedAt closedAt
+  additions deletions changedFiles reviewDecision
+  author { login }
+  comments { totalCount }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 10) { nodes { name color } }
+  reviewRequests(first: 20) {
+    nodes { requestedReviewer { __typename ... on User { login } } }
+  }
+  latestReviews(first: 20) {
+    nodes { databaseId author { login } state submittedAt body }
+  }
+  repository { owner { login } name }
+}
+
+fragment RepoIssue on Issue {
+  __typename
+  id number title body state url
+  createdAt updatedAt closedAt
+  author { login }
+  comments { totalCount }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 10) { nodes { name color } }
+  repository { owner { login } name }
+}
+
+query RepoBrowse($owner: String!, $name: String!, $n: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: $n
+      states: OPEN
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      totalCount
+      nodes { ...RepoPr }
+    }
+    issues(
+      first: $n
+      states: OPEN
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      totalCount
+      nodes { ...RepoIssue }
+    }
+  }
+  rateLimit { cost remaining resetAt limit }
+}
+"#;
+
 pub const VIEWER: &str = r#"
 query Viewer {
   viewer { login }
@@ -225,6 +281,39 @@ pub fn search() -> String {
 pub fn nodes() -> String {
     format!("{ITEM_FRAGMENTS}\n{NODES_BODY}")
 }
+
+/// Repositories the viewer owns personally, with GitHub's own open counts.
+/// `ownerAffiliations: [OWNER]` excludes org repos and repos they only
+/// collaborate on.
+///
+/// PR authors come along so Dependabot can be split out of the open-PR count;
+/// `totalCount` stays authoritative for the total. Pages are kept small
+/// because each repo pulls up to `OWNED_REPO_PR_SAMPLE` PR nodes.
+pub const OWNED_REPOS: &str = r#"
+query OwnedRepos($after: String) {
+  viewer {
+    repositories(
+      first: 25
+      after: $after
+      ownerAffiliations: [OWNER]
+      orderBy: { field: PUSHED_AT, direction: DESC }
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        pushedAt
+        owner { login }
+        pullRequests(states: OPEN, first: 100) {
+          totalCount
+          nodes { author { login } }
+        }
+        issues(states: OPEN) { totalCount }
+      }
+    }
+  }
+  rateLimit { cost remaining resetAt limit }
+}
+"#;
 
 pub const COMMENTS: &str = r#"
 query Comments($owner: String!, $name: String!, $number: Int!) {

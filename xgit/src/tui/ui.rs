@@ -6,10 +6,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 
-use crate::model::{IssueLink, ItemRow, ItemState, LinkKind, Role, View};
+use crate::model::{IssueLink, ItemRow, ItemState, LinkKind, RepoRow, RepoTab, Role, RunRow, View};
 use crate::timeutil::{relative, relative_short, truncate_width, wrap_text};
 
-use super::{App, FlatRow, Focus, Mode, StatusKind};
+use super::{App, FlatRow, Focus, Mode, Scope, StatusKind};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -41,7 +41,10 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     .split(area);
 
     draw_title(frame, app, chunks[0]);
-    draw_tabs(frame, app, chunks[1]);
+    match app.scope.clone() {
+        Some(scope) => draw_repo_bar(frame, app, chunks[1], &scope),
+        None => draw_tabs(frame, app, chunks[1]),
+    }
     draw_body(frame, app, chunks[2]);
     draw_status(frame, app, chunks[3]);
 
@@ -87,7 +90,7 @@ fn draw_title(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     let right = Line::from(vec![
         Span::styled(
-            if app.query.view.uses_time_filter() {
+            if app.scope.is_none() && app.query.view.uses_time_filter() {
                 app.query.time.label()
             } else {
                 String::new()
@@ -140,6 +143,53 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Replaces the main tab bar while a repo is open: name on the far left,
+/// then that repo's own tabs.
+fn draw_repo_bar(frame: &mut Frame, app: &App, area: Rect, scope: &Scope) {
+    let compact = area.width < 92;
+    let mut spans: Vec<Span> = vec![
+        Span::styled(
+            format!(" {} ", scope.full_name()),
+            Style::new().fg(Color::Black).bg(Theme::ACCENT).bold(),
+        ),
+        Span::raw("  "),
+    ];
+    for tab in RepoTab::ALL {
+        let count = scope.tab_total(tab);
+        let selected = scope.tab == tab;
+        let label = if compact {
+            format!(" {} {count} ", tab.name())
+        } else {
+            format!(" {} {count}  ", tab.name())
+        };
+        let style = if selected {
+            Style::new()
+                .fg(Color::Black)
+                .bg(Theme::PURPLE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::MUTED)
+        };
+        spans.push(Span::styled(label, style));
+        spans.push(Span::raw(" "));
+    }
+    if !app.query.search.is_empty() && app.mode != Mode::Filter {
+        spans.push(Span::styled(
+            format!("  /{} ", app.query.search),
+            Style::new().fg(Theme::ACCENT),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "esc back ",
+            Style::new().fg(Theme::FAINT),
+        )))
+        .right_aligned(),
+        area,
+    );
+}
+
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.preview_open {
         let cols = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
@@ -172,18 +222,46 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.selected + 1
     };
+    // A repo tab shows GitHub's open total next to the fetched slice.
+    let truncated = app
+        .scope
+        .as_ref()
+        .map(|s| s.tab_total(s.tab))
+        .filter(|total| *total > app.flat.len())
+        .map(|total| format!(" of {total}"))
+        .unwrap_or_default();
     let title = if app.mode == Mode::Filter {
         format!("  /{}▌ ", app.filter_buf)
     } else {
-        format!(" {}  {}/{} ", app.query.view.name(), pos, app.flat.len())
+        format!(
+            " {}  {}/{}{truncated} ",
+            app.list_name(),
+            pos,
+            app.flat.len()
+        )
     };
     let block = pane(focused).title(Span::styled(title, Style::new().fg(Theme::MUTED)));
 
+    let actions_tab = app
+        .scope
+        .as_ref()
+        .is_some_and(|s| s.tab == RepoTab::Actions);
+
     if app.flat.is_empty() {
-        let empty = if app.cfg.has_token() {
-            "Nothing here.  r sync   h/l views"
-        } else {
+        let empty = if app.scope.as_ref().is_some_and(|s| s.loading()) {
+            "fetching from GitHub…"
+        } else if !app.cfg.has_token() {
             "No local data. Set GITHUB_TOKEN and press R."
+        } else if actions_tab {
+            "No workflow runs.  r sync → this item refetches"
+        } else if app.scope.is_some() {
+            "Nothing open in this repo.  h/l tabs   esc back"
+        } else if app.query.view == View::MyRepos {
+            "No repos fetched yet.  r sync → this item retries"
+        } else if app.query.view == View::SeenRepos {
+            "No repos cached yet.  r sync"
+        } else {
+            "Nothing here.  r sync   h/l views"
         };
         frame.render_widget(
             Paragraph::new(empty).block(block).fg(Theme::DIM).centered(),
@@ -192,20 +270,38 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if app.query.view == View::Inbox {
-        draw_inbox_table(frame, app, area, block);
+    if actions_tab {
+        draw_runs_table(frame, app, area, block);
         return;
+    }
+    if app.scope.is_none() {
+        match app.query.view {
+            View::Inbox => {
+                draw_inbox_table(frame, app, area, block);
+                return;
+            }
+            View::SeenRepos | View::MyRepos => {
+                draw_repos_table(frame, app, area, block);
+                return;
+            }
+            _ => {}
+        }
     }
 
     let compact = area.width < 64;
     let show_review = !compact && area.width >= 96;
-    let repo_w = if area.width >= 110 {
+    // Inside one repo the owner/name repeats on every row; `#number` is enough.
+    let scoped = app.scope.is_some();
+    let repo_w = if scoped {
+        8
+    } else if area.width >= 110 {
         24
     } else if compact {
         16
     } else {
         20
     };
+    let repo_header = if scoped { "item" } else { "repository" };
 
     let (widths, header_cells) = if compact {
         let header_style = Style::new().fg(Theme::FAINT);
@@ -217,7 +313,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             ],
             vec![
                 Cell::from(""),
-                Cell::from("repo").style(header_style),
+                Cell::from(if scoped { "item" } else { "repo" }).style(header_style),
                 Cell::from("title").style(header_style),
             ],
         )
@@ -234,9 +330,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         ];
         let mut header_cells = vec![
             Cell::from(""),
-            Cell::from("role").style(header_style),
+            // A repo browser lists everyone's work, so the author is what
+            // tells the rows apart — your own role is in the preview.
+            Cell::from(if scoped { "author" } else { "role" }).style(header_style),
             Cell::from("state").style(header_style),
-            Cell::from("repository").style(header_style),
+            Cell::from(repo_header).style(header_style),
             Cell::from("title").style(header_style),
             Cell::from("update").style(header_style),
             Cell::from("linked").style(header_style),
@@ -253,8 +351,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .flat
         .iter()
         .filter_map(|row| match row {
-            FlatRow::Item(i) => Some(item_row(&app.items[*i], show_review, compact)),
-            FlatRow::Notif(_) => None,
+            FlatRow::Item(i) => Some(item_row(&app.items[*i], show_review, compact, scoped)),
+            FlatRow::Notif(_) | FlatRow::Repo(_) | FlatRow::Run(_) => None,
             FlatRow::Child { parent, link } => {
                 let parent = app.items.get(*parent)?;
                 let link = parent.links.get(*link)?;
@@ -323,6 +421,282 @@ fn draw_inbox_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
+fn draw_repos_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'static>) {
+    let narrow = area.width < 48;
+    let compact = area.width < 64;
+    let h = Style::new().fg(Theme::FAINT);
+    let (widths, header_cells) = if narrow {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(10),
+                Constraint::Length(4),
+                Constraint::Length(4),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("repository").style(h),
+                Cell::from("PRs").style(h),
+                Cell::from("dep").style(h),
+            ],
+        )
+    } else if compact {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(12),
+                Constraint::Length(4),
+                Constraint::Length(5),
+                Constraint::Length(6),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("repository").style(h),
+                Cell::from("PRs").style(h),
+                Cell::from("deps").style(h),
+                Cell::from("issues").style(h),
+            ],
+        )
+    } else {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(38),
+                Constraint::Length(8),
+                Constraint::Length(5),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                // Keeps the counts next to the names on a wide terminal.
+                Constraint::Min(0),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("repository").style(h),
+                Cell::from("open PRs").style(h),
+                Cell::from("deps").style(h),
+                Cell::from("issues").style(h),
+                Cell::from("unread").style(h),
+                Cell::from("update").style(h),
+                Cell::from(""),
+            ],
+        )
+    };
+    let rows: Vec<Row> = app
+        .repos
+        .iter()
+        .map(|r| repo_row(r, compact, narrow))
+        .collect();
+    let table = Table::new(rows, widths)
+        .header(Row::new(header_cells).height(1))
+        .block(block)
+        .column_spacing(2)
+        .row_highlight_style(Style::new().bg(Theme::SURFACE).fg(Theme::TEXT))
+        .highlight_spacing(HighlightSpacing::Never)
+        .highlight_symbol("");
+    frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn repo_row(r: &RepoRow, compact: bool, narrow: bool) -> Row<'static> {
+    let dot = if r.unread > 0 {
+        Cell::from("●").style(Style::new().fg(Theme::AMBER).bold())
+    } else {
+        Cell::from(" ")
+    };
+    let prs = count_cell(r.open_prs, Theme::ACCENT);
+    // Dependency bumps are noise next to human PRs — dimmed, never accented.
+    let deps = count_cell(r.bot_prs, Theme::DIM);
+    let issues = count_cell(r.open_issues, Theme::BLUE);
+    if narrow {
+        return Row::new(vec![
+            dot,
+            Cell::from(r.full_name()).style(Style::new().fg(Color::White)),
+            prs,
+            deps,
+        ])
+        .height(1);
+    }
+    if compact {
+        return Row::new(vec![
+            dot,
+            Cell::from(r.full_name()).style(Style::new().fg(Color::White)),
+            prs,
+            deps,
+            issues,
+        ])
+        .height(1);
+    }
+    Row::new(vec![
+        dot,
+        Cell::from(r.full_name()).style(Style::new().fg(Color::White)),
+        prs,
+        deps,
+        issues,
+        count_cell(r.unread, Theme::AMBER),
+        Cell::from(
+            r.updated_at
+                .as_deref()
+                .map(relative_short)
+                .unwrap_or_default(),
+        )
+        .style(Style::new().fg(Theme::DIM)),
+        Cell::from(""),
+    ])
+    .height(1)
+}
+
+fn count_cell(n: usize, color: Color) -> Cell<'static> {
+    if n == 0 {
+        Cell::from("—").style(Style::new().fg(Theme::FAINT))
+    } else {
+        Cell::from(n.to_string()).style(Style::new().fg(color))
+    }
+}
+
+/// Three tiers: a full table, a compact one, and the narrow sidebar you get
+/// with the preview open, where only the workflow and its age fit.
+fn draw_runs_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'static>) {
+    let narrow = area.width < 48;
+    let compact = area.width < 80;
+    let h = Style::new().fg(Theme::FAINT);
+    let (widths, header_cells) = if narrow {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(8),
+                Constraint::Length(5),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("workflow").style(h),
+                Cell::from("start").style(h),
+            ],
+        )
+    } else if compact {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(14),
+                Constraint::Min(12),
+                Constraint::Length(6),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("workflow").style(h),
+                Cell::from("run").style(h),
+                Cell::from("update").style(h),
+            ],
+        )
+    } else {
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(10),
+                Constraint::Length(16),
+                Constraint::Min(16),
+                Constraint::Length(14),
+                Constraint::Length(8),
+                Constraint::Length(6),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("result").style(h),
+                Cell::from("workflow").style(h),
+                Cell::from("run").style(h),
+                Cell::from("branch").style(h),
+                Cell::from("event").style(h),
+                Cell::from("start").style(h),
+            ],
+        )
+    };
+    let rows: Vec<Row> = app
+        .runs
+        .iter()
+        .map(|r| run_row(r, compact, narrow))
+        .collect();
+    let table = Table::new(rows, widths)
+        .header(Row::new(header_cells).height(1))
+        .block(block)
+        .column_spacing(2)
+        .row_highlight_style(Style::new().bg(Theme::SURFACE).fg(Theme::TEXT))
+        .highlight_spacing(HighlightSpacing::Never)
+        .highlight_symbol("");
+    frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn run_row(r: &RunRow, compact: bool, narrow: bool) -> Row<'static> {
+    let color = run_color(r.outcome());
+    let title = if r.title.trim().is_empty() {
+        format!("#{}", r.run_number)
+    } else {
+        format!("#{}  {}", r.run_number, r.title)
+    };
+    let when = r
+        .created_at
+        .as_deref()
+        .map(relative_short)
+        .unwrap_or_default();
+    if narrow {
+        return Row::new(vec![
+            Cell::from("●").style(Style::new().fg(color)),
+            Cell::from(r.name.clone()).style(Style::new().fg(Theme::MAGENTA)),
+            Cell::from(when).style(Style::new().fg(Theme::DIM)),
+        ])
+        .height(1);
+    }
+    if compact {
+        return Row::new(vec![
+            Cell::from("●").style(Style::new().fg(color)),
+            Cell::from(r.name.clone()).style(Style::new().fg(Theme::MAGENTA)),
+            Cell::from(title).style(Style::new().fg(Theme::TEXT)),
+            Cell::from(when).style(Style::new().fg(Theme::DIM)),
+        ])
+        .height(1);
+    }
+    Row::new(vec![
+        Cell::from("●").style(Style::new().fg(color)),
+        Cell::from(run_label(r.outcome())).style(Style::new().fg(color)),
+        Cell::from(r.name.clone()).style(Style::new().fg(Theme::MAGENTA)),
+        Cell::from(title).style(Style::new().fg(Theme::TEXT)),
+        Cell::from(r.branch.clone()).style(Style::new().fg(Theme::BLUE)),
+        Cell::from(event_label(&r.event)).style(Style::new().fg(Theme::DIM)),
+        Cell::from(when).style(Style::new().fg(Theme::DIM)),
+    ])
+    .height(1)
+}
+
+fn event_label(event: &str) -> String {
+    match event {
+        "pull_request" => "pull".into(),
+        "pull_request_target" => "pull tgt".into(),
+        "workflow_dispatch" => "manual".into(),
+        "workflow_run" => "workflow".into(),
+        "schedule" => "cron".into(),
+        "repository_dispatch" => "dispatch".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn run_label(outcome: &str) -> String {
+    match outcome {
+        "in_progress" => "running".into(),
+        "startup_failure" => "startup".into(),
+        "action_required" => "action".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn run_color(outcome: &str) -> Color {
+    match outcome {
+        "success" => Theme::GREEN,
+        "failure" | "timed_out" | "startup_failure" => Theme::RED,
+        "in_progress" | "queued" | "pending" | "waiting" | "requested" => Theme::AMBER,
+        "cancelled" | "skipped" | "stale" | "neutral" => Theme::DIM,
+        "action_required" => Theme::MAGENTA,
+        _ => Theme::MUTED,
+    }
+}
+
 fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
     let unread = if n.unread {
         Cell::from("●").style(Style::new().fg(Theme::AMBER).bold())
@@ -358,7 +732,7 @@ fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
     .height(1)
 }
 
-fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
+fn item_row(item: &ItemRow, show_review: bool, compact: bool, scoped: bool) -> Row<'static> {
     let unread = if item.unread {
         Cell::from("●").style(Style::new().fg(Theme::AMBER).bold())
     } else {
@@ -370,21 +744,32 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
     } else {
         (state_label(item.state), state_color(item.state))
     };
+    let ident = if scoped {
+        format!("#{}", item.number)
+    } else if compact {
+        format!("{}#{}", item.repo, item.number)
+    } else {
+        format_repo(&item.owner, &item.repo, item.number)
+    };
     if compact {
         return Row::new(vec![
             unread,
-            Cell::from(format!("{}#{}", item.repo, item.number))
-                .style(Style::new().fg(Color::White)),
+            Cell::from(ident).style(Style::new().fg(Color::White)),
             Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
         ])
         .height(1);
     }
+    let who = if scoped {
+        Cell::from(truncate_width(item.author.as_deref().unwrap_or("—"), 10))
+            .style(Style::new().fg(Theme::GREEN))
+    } else {
+        Cell::from(role_label(role)).style(Style::new().fg(role_color(role)))
+    };
     let mut cells = vec![
         unread,
-        Cell::from(role_label(role)).style(Style::new().fg(role_color(role))),
+        who,
         Cell::from(state_text).style(Style::new().fg(state_fg)),
-        Cell::from(format_repo(&item.owner, &item.repo, item.number))
-            .style(Style::new().fg(Color::White)),
+        Cell::from(ident).style(Style::new().fg(Color::White)),
         Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
         Cell::from(
             item.updated_at
@@ -460,6 +845,14 @@ fn format_repo(owner: &str, repo: &str, number: i64) -> String {
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Detail && app.mode == Mode::Normal;
+    if let Some(repo) = app.selected_repo() {
+        draw_repo_preview(frame, repo, area, focused, app.query.view == View::MyRepos);
+        return;
+    }
+    if let Some(run) = app.selected_run() {
+        draw_run_preview(frame, run, area, focused, app.detail_scroll);
+        return;
+    }
     let Some(d) = &app.detail else {
         let hint = if let Some(n) = app.selected_inbox() {
             format!(
@@ -738,6 +1131,160 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_repo_preview(frame: &mut Frame, repo: &RepoRow, area: Rect, focused: bool, owned: bool) {
+    let note: &[&str] = if owned {
+        &[
+            "open counts are GitHub's totals for the repository;",
+            "unread is from your local cache",
+        ]
+    } else {
+        &[
+            "counts cover the issues and PRs xgit has synced for you,",
+            "not every open PR in the repository",
+        ]
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            repo.full_name(),
+            Style::new().fg(Theme::ACCENT).bold(),
+        )),
+        Line::styled(repo.html_url(), Style::new().fg(Theme::FAINT)),
+        Line::from(""),
+        section(if owned { "on github" } else { "cached" }),
+        Line::from(vec![
+            label("open PRs"),
+            Span::styled(repo.open_prs.to_string(), Style::new().fg(Theme::TEXT)),
+            Span::styled("   human authors", Style::new().fg(Theme::FAINT)),
+        ]),
+        Line::from(vec![
+            label("deps"),
+            Span::styled(repo.bot_prs.to_string(), Style::new().fg(Theme::DIM)),
+            Span::styled(
+                format!("   dependabot   {} total", repo.total_prs()),
+                Style::new().fg(Theme::FAINT),
+            ),
+        ]),
+        Line::from(vec![
+            label("issues"),
+            Span::styled(repo.open_issues.to_string(), Style::new().fg(Theme::TEXT)),
+        ]),
+        Line::from(vec![
+            label("unread"),
+            Span::styled(repo.unread.to_string(), Style::new().fg(Theme::AMBER)),
+        ]),
+        Line::from(vec![
+            label(if owned { "pushed" } else { "activity" }),
+            Span::styled(
+                repo.updated_at
+                    .as_deref()
+                    .map(relative)
+                    .unwrap_or_else(|| "—".into()),
+                Style::new().fg(Theme::DIM),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    for text in note {
+        lines.push(Line::styled(
+            (*text).to_string(),
+            Style::new().fg(Theme::FAINT).italic(),
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "enter  open this repo's PRs / Issues / Actions",
+        Style::new().fg(Theme::MUTED),
+    ));
+    lines.push(Line::styled(
+        "o      open on github.com",
+        Style::new().fg(Theme::MUTED),
+    ));
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            pane(focused).title(Span::styled(" repository ", Style::new().fg(Theme::MUTED))),
+        ),
+        area,
+    );
+}
+
+fn draw_run_preview(frame: &mut Frame, run: &RunRow, area: Rect, focused: bool, scroll: u16) {
+    let color = run_color(run.outcome());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{}/{}", run.owner, run.repo),
+                Style::new().fg(Theme::ACCENT).bold(),
+            ),
+            Span::raw("   "),
+            badge(&run_label(run.outcome()), color),
+        ]),
+        Line::from(Span::styled(
+            if run.title.trim().is_empty() {
+                run.name.clone()
+            } else {
+                run.title.clone()
+            },
+            Style::new().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if let Some(url) = &run.html_url {
+        lines.push(Line::styled(url.clone(), Style::new().fg(Theme::FAINT)));
+    }
+    lines.push(Line::from(""));
+    lines.push(section("run"));
+    lines.push(Line::from(vec![
+        label("workflow"),
+        Span::styled(run.name.clone(), Style::new().fg(Theme::MAGENTA)),
+    ]));
+    lines.push(Line::from(vec![
+        label("number"),
+        Span::styled(format!("#{}", run.run_number), Style::new().fg(Theme::TEXT)),
+    ]));
+    lines.push(Line::from(vec![
+        label("status"),
+        Span::styled(run.status.clone(), Style::new().fg(color)),
+    ]));
+    lines.push(Line::from(vec![
+        label("branch"),
+        Span::styled(run.branch.clone(), Style::new().fg(Theme::BLUE)),
+    ]));
+    lines.push(Line::from(vec![
+        label("event"),
+        Span::styled(run.event.clone(), Style::new().fg(Theme::DIM)),
+    ]));
+    lines.push(Line::from(vec![
+        label("actor"),
+        Span::styled(
+            run.actor.clone().unwrap_or_else(|| "—".into()),
+            Style::new().fg(Theme::GREEN),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(section("timeline"));
+    if let Some(c) = &run.created_at {
+        lines.push(Line::from(vec![
+            label("started"),
+            Span::styled(relative(c), Style::new().fg(Theme::DIM)),
+        ]));
+    }
+    if let Some(u) = &run.updated_at {
+        lines.push(Line::from(vec![
+            label("updated"),
+            Span::styled(relative(u), Style::new().fg(Theme::DIM)),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(pane(focused).title(Span::styled(
+                " workflow run ",
+                Style::new().fg(Theme::MUTED),
+            )))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn section(title: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("── {title} "),
@@ -766,15 +1313,32 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     let left = if app.status.set_at.elapsed().as_secs() < 6 {
         app.status.message.clone()
+    } else if let Some(scope) = &app.scope {
+        format!(
+            "{} · {} · {} rows",
+            scope.full_name(),
+            app.list_name().to_ascii_lowercase(),
+            app.flat.len()
+        )
     } else {
         format!(
-            "{} · {} items",
+            "{} · {} {}",
             app.query.view.name().to_ascii_lowercase(),
-            app.items.len()
+            app.flat.len(),
+            if app.query.view.is_repo_list() {
+                "repos"
+            } else {
+                "items"
+            }
         )
     };
-    let keys =
-        "r sync   t link   T all links   i preview   y copy   h/l views   j/k   / filter   ?";
+    let keys = if app.scope.is_some() {
+        "esc back   h/l tabs   i preview   y copy   o open   r sync   j/k   ?"
+    } else if app.query.view.is_repo_list() {
+        "enter open repo   o browser   y copy   h/l views   j/k   / filter   ?"
+    } else {
+        "r sync   t link   T all links   i preview   y copy   h/l views   j/k   / filter   ?"
+    };
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -802,13 +1366,33 @@ Views   (h / l  or  ← →)
   Closed PRs    closed / merged PRs  (t time)
   All Issues    open issues, with linked PRs nested
   Closed Issues closed issues, with linked PRs nested
+  Seen Repos    repos you are involved in, most open PRs first
+  My Repos      every repo you own, most open PRs first
+
+Repos
+  enter         open a repo: its own bar with PRs / Issues / Actions
+  h/l           move between that repo's tabs
+  esc           back to the repo list and the main bar
+  Seen Repos counts what xgit synced for you; My Repos shows GitHub's
+  repo-wide totals and is fetched when the tab opens.
+  open PRs counts human authors only; deps is Dependabot's, and repos
+  sort on the human count so dependency bumps cannot bury real work.
+
+Inside a repo
+  Everything is fetched from GitHub on enter and never cached: the open
+  PRs and issues by everyone, plus the 30 latest workflow runs. The bar
+  shows GitHub's totals; the list holds the 50 most recently updated of
+  each, and says `of N` when there are more.
+  r -> this item   refetch the whole repo
+  c                fetch comments for the selected item
+  m                nothing to mark — this list is not in the cache
 
 Movement
   h/l           previous / next view
   j/k           list  (or preview when focused)
   i             open / close preview (right, 3/4 width)
   tab           list / preview  (when preview is open)
-  esc           close preview
+  esc           close preview, then leave the repo
   g / G         top / bottom
   n / N         next / previous unread
   J / K         scroll preview
@@ -816,15 +1400,16 @@ Movement
   t             toggle linked items for the selected PR/issue
   T             toggle linked items for the whole list
 
-Actions
+Keys
   y             copy GitHub URL (works over SSH)
-  o  enter      open in browser
+  o  enter      open in browser  (enter opens a repo row instead)
   m             toggle local read/unread
   c             fetch comments
   r             sync menu (this item / last 7–90d / all)
   q             quit
 ";
-    let popup = centered(area, 62, 32);
+    // Widest line is 74 columns, plus the border and padding.
+    let popup = centered(area, 79, 53);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text)

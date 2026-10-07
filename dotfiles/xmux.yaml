@@ -28,6 +28,3 @@ sessions:
   2: { name: eos, key: alt+2 }
   3: { name: tunnels, key: alt+3 }
   4: { name: crypto, key: alt+4 }
-  5: { name: rmux, key: alt+5 }
-  6: { name: sssh, key: alt+6 }
-  7: { name: xls, key: F7 }

@@ -307,11 +307,7 @@ impl HostOut {
 
     fn writing_slice(&self) -> Option<&[u8]> {
         let rest = &self.writing[self.off..];
-        if rest.is_empty() {
-            None
-        } else {
-            Some(rest)
-        }
+        if rest.is_empty() { None } else { Some(rest) }
     }
 
     fn advance(&mut self, n: usize) {

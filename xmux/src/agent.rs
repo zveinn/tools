@@ -237,7 +237,9 @@ fn new_session(
         return Err(format!("session \"{name}\" already exists"));
     }
     if config.pins.iter().any(|p| p.name == name) {
-        return Err(format!("\"{name}\" is pinned in the config; pick another name"));
+        return Err(format!(
+            "\"{name}\" is pinned in the config; pick another name"
+        ));
     }
     let si = create_session(sessions, config, DEFAULT_SIZE, name.to_string())
         .map_err(|e| e.to_string())?;
@@ -280,7 +282,9 @@ fn rename(
         return Err(format!("session \"{to}\" already exists"));
     }
     if config.pins.iter().any(|p| p.name == to) {
-        return Err(format!("\"{to}\" is pinned in the config; pick another name"));
+        return Err(format!(
+            "\"{to}\" is pinned in the config; pick another name"
+        ));
     }
     let session = agent_session(sessions, name)?;
     session.name = to.to_string();
@@ -307,7 +311,9 @@ fn kill(
     if session.tabs.len() == 1 {
         let si = sessions.iter().position(|s| s.name == name).unwrap();
         sessions.remove(si);
-        return Ok(format!("killed tab \"{tab}\" — it was the last, session \"{name}\" is gone"));
+        return Ok(format!(
+            "killed tab \"{tab}\" — it was the last, session \"{name}\" is gone"
+        ));
     }
     session.tabs.remove(ti);
     if ti < session.active_tab {
@@ -347,11 +353,7 @@ fn send(
     Ok(String::new())
 }
 
-fn read(
-    sessions: &mut [Session],
-    name: &str,
-    tab: &str,
-) -> std::result::Result<String, String> {
+fn read(sessions: &mut [Session], name: &str, tab: &str) -> std::result::Result<String, String> {
     let session = agent_session(sessions, name)?;
     let ti = tab_index(session, tab)?;
     session.last_activity = std::time::Instant::now();
@@ -383,49 +385,49 @@ fn render_text(session: &Session, ti: usize) -> Result<String> {
     let mut row_alloc = RowIterator::new()?;
     let mut cell_alloc = CellIterator::new()?;
 
-    let mut draw_pane = |grid: &mut Vec<Vec<String>>,
-                         pane: &crate::model::Pane,
-                         rect: Rect|
-     -> Result<()> {
-        let snapshot = render_state.update(&pane.term)?;
-        let mut row_it = row_alloc.update(&snapshot)?;
-        let mut y = rect.y as usize;
-        let mut text = String::with_capacity(16);
-        while let Some(row) = row_it.next() {
-            if y >= h {
-                break;
-            }
-            let mut x = rect.x as usize;
-            let mut cell_it = cell_alloc.update(row)?;
-            while let Some(cell) = cell_it.next() {
-                if x >= w {
+    let mut draw_pane =
+        |grid: &mut Vec<Vec<String>>, pane: &crate::model::Pane, rect: Rect| -> Result<()> {
+            let snapshot = render_state.update(&pane.term)?;
+            let mut row_it = row_alloc.update(&snapshot)?;
+            let mut y = rect.y as usize;
+            let mut text = String::with_capacity(16);
+            while let Some(row) = row_it.next() {
+                if y >= h {
                     break;
                 }
-                let wide = match cell.raw_cell()?.wide()? {
-                    CellWide::SpacerTail | CellWide::SpacerHead => continue,
-                    CellWide::Wide => true,
-                    CellWide::Narrow => false,
-                };
-                if cell.graphemes_len()? == 0 {
-                    grid[y][x] = " ".to_string();
-                } else {
-                    cell.graphemes_utf8(&mut text)?;
-                    grid[y][x] = text.clone();
-                }
-                if wide && x + 1 < w {
-                    // The glyph spans two columns; blank its spacer so
-                    // the line stays the right visual width.
-                    grid[y][x + 1] = String::new();
+                let mut x = rect.x as usize;
+                let mut cell_it = cell_alloc.update(row)?;
+                while let Some(cell) = cell_it.next() {
+                    if x >= w {
+                        break;
+                    }
+                    let wide = match cell.raw_cell()?.wide()? {
+                        CellWide::SpacerTail | CellWide::SpacerHead => continue,
+                        CellWide::Wide => true,
+                        CellWide::Narrow => false,
+                    };
+                    if cell.graphemes_len()? == 0 {
+                        grid[y][x] = " ".to_string();
+                    } else {
+                        cell.graphemes_utf8(&mut text)?;
+                        grid[y][x] = text.clone();
+                    }
+                    if wide && x + 1 < w {
+                        // The glyph spans two columns; blank its spacer so
+                        // the line stays the right visual width.
+                        grid[y][x + 1] = String::new();
+                        x += 1;
+                    }
                     x += 1;
                 }
-                x += 1;
+                y += 1;
             }
-            y += 1;
-        }
-        Ok(())
-    };
+            Ok(())
+        };
 
-    if tab.zoomed && let Some(pane) = tab.layout.pane(tab.focused) {
+    if tab.zoomed
+        && let Some(pane) = tab.layout.pane(tab.focused)
+    {
         draw_pane(&mut grid, pane, full)?;
     } else {
         tab.layout
@@ -444,13 +446,23 @@ fn render_text(session: &Session, ti: usize) -> Result<String> {
         out.push_str(row.concat().trim_end());
         out.push('\n');
     }
-    // Tab-bar line, with the rendered tab bracketed.
-    out.push_str(&format!("== session \"{}\" · tabs:", session.name));
+    // Tab-bar line, with the rendered tab bracketed. Agent marks use
+    // the same glyphs as the on-screen tab bar.
+    let session_mark = crate::agent_status::mark(session.agent_activity());
+    if session_mark.is_empty() {
+        out.push_str(&format!("== session \"{}\" · tabs:", session.name));
+    } else {
+        out.push_str(&format!(
+            "== session {session_mark} \"{}\" · tabs:",
+            session.name
+        ));
+    }
     for (i, t) in session.tabs.iter().enumerate() {
+        let name = crate::agent_status::prefix_name(&t.name, t.agent_activity());
         if i == ti {
-            out.push_str(&format!(" [{}]", t.name));
+            out.push_str(&format!(" [{name}]"));
         } else {
-            out.push_str(&format!(" {}", t.name));
+            out.push_str(&format!(" {name}"));
         }
     }
     out.push_str(" ==\n");

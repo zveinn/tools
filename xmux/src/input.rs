@@ -606,8 +606,8 @@ fn apply_select(
     active: usize,
     enabled: bool,
 ) -> Option<String> {
-    use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
     use libghostty_vt::selection::FormatOptions;
+    use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
     use libghostty_vt::terminal::{Point, PointCoordinate};
 
     match kind {
@@ -635,14 +635,13 @@ fn apply_select(
                 let mut press = PressEvent::new()?;
                 // Left untimed on purpose: libghostty then offers only
                 // single-click behaviour, which is all we want.
-                press
-                    .set_position(
-                        // Left-of-cell boundary: the anchor cell is
-                        // included when dragging forward (re-anchored
-                        // right-of-cell when a drag turns backward).
-                        (f64::from(lx) + 0.25) * f64::from(crate::model::CELL_PX.0),
-                        (f64::from(ly) + 0.5) * f64::from(crate::model::CELL_PX.1),
-                    )?;
+                press.set_position(
+                    // Left-of-cell boundary: the anchor cell is
+                    // included when dragging forward (re-anchored
+                    // right-of-cell when a drag turns backward).
+                    (f64::from(lx) + 0.25) * f64::from(crate::model::CELL_PX.0),
+                    (f64::from(ly) + 0.5) * f64::from(crate::model::CELL_PX.1),
+                )?;
                 if let Some(selection) = press.apply(gesture, &pane.term, grid_ref)? {
                     pane.term.set_selection(Some(&selection))?;
                     return Ok(Some(()));
@@ -903,13 +902,22 @@ pub fn name_matches(name: &str, query: &str) -> bool {
 }
 
 /// The names the manager currently lists (used for `/` filtering).
-pub fn manager_names(overlay: Overlay, sessions: &[Session], active: usize, pins: &[Pin]) -> Vec<String> {
+pub fn manager_names(
+    overlay: Overlay,
+    sessions: &[Session],
+    active: usize,
+    pins: &[Pin],
+) -> Vec<String> {
     match overlay {
         Overlay::Sessions { agents } => crate::agent::manager_entries(pins, sessions, agents)
             .into_iter()
             .map(|e| e.name)
             .collect(),
-        Overlay::Tabs => sessions[active].tabs.iter().map(|t| t.name.clone()).collect(),
+        Overlay::Tabs => sessions[active]
+            .tabs
+            .iter()
+            .map(|t| t.name.clone())
+            .collect(),
     }
 }
 
@@ -924,7 +932,12 @@ pub fn manager_count(overlay: Overlay, sessions: &[Session], active: usize, pins
 /// Highlight index of the viewed session/tab in the overlay's list.
 /// A session that belongs to the other list (agent vs normal) is not a
 /// row here, so the cursor falls back to 0 rather than the raw vec index.
-pub fn manager_cursor(overlay: Overlay, sessions: &[Session], active: usize, pins: &[Pin]) -> usize {
+pub fn manager_cursor(
+    overlay: Overlay,
+    sessions: &[Session],
+    active: usize,
+    pins: &[Pin],
+) -> usize {
     match overlay {
         Overlay::Sessions { agents } => crate::agent::manager_entries(pins, sessions, agents)
             .iter()
@@ -980,8 +993,7 @@ fn run_search(
         })),
         NamingOutcome::Create => {
             let matched = matches(sessions, *active);
-            let Some(&orig) = matched.get((*selected).min(matched.len().saturating_sub(1)))
-            else {
+            let Some(&orig) = matched.get((*selected).min(matched.len().saturating_sub(1))) else {
                 return Ok(None); // no matches: stay in the search
             };
             match overlay {
@@ -1044,9 +1056,7 @@ pub fn run_manager(
                     if let Some(entry) = entries.get(i) {
                         *active = match entry.running {
                             Some(si) => si,
-                            None => {
-                                create_session(sessions, config, size, entry.name.clone())?
-                            }
+                            None => create_session(sessions, config, size, entry.name.clone())?,
                         };
                     }
                 }
@@ -1256,15 +1266,15 @@ impl TextInput {
                 }
                 b'\r' | b'\n' => return (NamingOutcome::Create, moved),
                 0x7f | 0x08 => self.backspace(),
-                0x01 => self.cursor = 0,            // ctrl+a
-                0x05 => self.cursor = self.len(),   // ctrl+e
+                0x01 => self.cursor = 0,          // ctrl+a
+                0x05 => self.cursor = self.len(), // ctrl+e
                 0x15 => {
                     // ctrl+u: clear the line
                     self.text.clear();
                     self.cursor = 0;
                 }
-                0x17 => self.delete_word(),         // ctrl+w
-                b if b < 0x20 => {}                 // other control bytes
+                0x17 => self.delete_word(), // ctrl+w
+                b if b < 0x20 => {}         // other control bytes
                 b => {
                     // One UTF-8 character, however many bytes it takes.
                     let width = match b {
@@ -1503,9 +1513,7 @@ pub fn handle_input(
                         if let Some(pin) = config.pins.get(pi) {
                             *active = match sessions.iter().position(|s| s.name == pin.name) {
                                 Some(si) => si,
-                                None => {
-                                    create_session(sessions, config, size, pin.name.clone())?
-                                }
+                                None => create_session(sessions, config, size, pin.name.clone())?,
                             };
                         }
                     }
@@ -1545,8 +1553,7 @@ pub fn handle_input(
                     InputAction::FocusDir(dir) => {
                         let session = &mut sessions[*active];
                         session.tabs[session.active_tab].set_zoom(false, size)?;
-                        let moved =
-                            session.tabs[session.active_tab].focus_dir(dir, size)?;
+                        let moved = session.tabs[session.active_tab].focus_dir(dir, size)?;
                         // At the tab's edge, left/right jump to the
                         // neighboring tab (wrapping) and land on the pane
                         // nearest the edge we came in over.
@@ -1559,8 +1566,7 @@ pub fn handle_input(
                                         .focus_edge(NavDir::Left, size)?;
                                 }
                                 NavDir::Left => {
-                                    session.active_tab =
-                                        (session.active_tab + count - 1) % count;
+                                    session.active_tab = (session.active_tab + count - 1) % count;
                                     session.tabs[session.active_tab]
                                         .focus_edge(NavDir::Right, size)?;
                                 }
@@ -1571,8 +1577,7 @@ pub fn handle_input(
                     InputAction::Manager(overlay) => {
                         // Bytes typed right after the chord are already
                         // manager input.
-                        let mut selected =
-                            manager_cursor(overlay, sessions, *active, &config.pins);
+                        let mut selected = manager_cursor(overlay, sessions, *active, &config.pins);
                         next_mode = Some(
                             run_manager(
                                 &manager_actions(buf, bindings),
@@ -1583,7 +1588,11 @@ pub fn handle_input(
                                 size,
                                 config,
                             )?
-                            .unwrap_or(Mode::Manager { overlay, selected, search: None }),
+                            .unwrap_or(Mode::Manager {
+                                overlay,
+                                selected,
+                                search: None,
+                            }),
                         );
                         buf = &[];
                     }
@@ -1667,8 +1676,7 @@ pub fn handle_input(
                                         } else {
                                             typed
                                         };
-                                        *active =
-                                            create_session(sessions, config, size, name)?;
+                                        *active = create_session(sessions, config, size, name)?;
                                         // Created from the agent view =
                                         // an agent session.
                                         sessions[*active].agent = *agents;
@@ -1680,7 +1688,9 @@ pub fn handle_input(
                                         } else {
                                             typed
                                         };
-                                        session.tabs.push(crate::model::Tab::new(size, name, config)?);
+                                        session
+                                            .tabs
+                                            .push(crate::model::Tab::new(size, name, config)?);
                                         session.active_tab = session.tabs.len() - 1;
                                     }
                                 }
@@ -1997,26 +2007,10 @@ mod tests {
                 x: 1,
                 y: 1,
             },
-            MouseEvent::Drag {
-                cb: 32,
-                x: 2,
-                y: 1,
-            },
-            MouseEvent::Drag {
-                cb: 32,
-                x: 3,
-                y: 1,
-            },
-            MouseEvent::Drag {
-                cb: 32,
-                x: 8,
-                y: 4,
-            },
-            MouseEvent::Release {
-                cb: 0,
-                x: 8,
-                y: 4,
-            },
+            MouseEvent::Drag { cb: 32, x: 2, y: 1 },
+            MouseEvent::Drag { cb: 32, x: 3, y: 1 },
+            MouseEvent::Drag { cb: 32, x: 8, y: 4 },
+            MouseEvent::Release { cb: 0, x: 8, y: 4 },
         ];
         assert_eq!(
             coalesce_mouse(events),
@@ -2027,16 +2021,8 @@ mod tests {
                     x: 1,
                     y: 1,
                 },
-                MouseEvent::Drag {
-                    cb: 32,
-                    x: 8,
-                    y: 4,
-                },
-                MouseEvent::Release {
-                    cb: 0,
-                    x: 8,
-                    y: 4,
-                },
+                MouseEvent::Drag { cb: 32, x: 8, y: 4 },
+                MouseEvent::Release { cb: 0, x: 8, y: 4 },
             ]
         );
     }

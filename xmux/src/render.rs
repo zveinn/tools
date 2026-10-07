@@ -85,7 +85,9 @@ pub fn draw_session(
     let mut cursor = None;
     let mut focus_rect = None;
     let focused = tab.focused;
-    if tab.zoomed && let Some(pane) = tab.layout.pane(focused) {
+    if tab.zoomed
+        && let Some(pane) = tab.layout.pane(focused)
+    {
         // Fullscreen: only the focused pane, no dividers.
         cursor = renderer.draw_at(&pane.term, out, area, full)?;
     } else {
@@ -164,7 +166,12 @@ fn draw_tab_bar(
 /// about where a tab is.
 fn tab_bar_layout(session: &Session, cols: u16) -> (Option<String>, Vec<(usize, String, u16)>) {
     let cols = cols as usize;
-    let chip = format!(" {} ", session.name);
+    // Session-wide mark: a working pane anywhere in the session, else an
+    // agent sitting at its prompt. Tabs below carry their own mark.
+    let chip = match crate::agent_status::mark(session.agent_activity()) {
+        "" => format!(" {} ", session.name),
+        mark => format!(" {mark} {} ", session.name),
+    };
     let mut used = 0usize;
     let chip = if chip.chars().count() <= cols {
         used += chip.chars().count();
@@ -175,11 +182,14 @@ fn tab_bar_layout(session: &Session, cols: u16) -> (Option<String>, Vec<(usize, 
 
     let mut segments = Vec::new();
     for (i, tab) in session.tabs.iter().enumerate() {
-        // A fullscreened tab advertises it in its label.
+        // A fullscreened tab advertises it in its label. An agent mark
+        // sits in front of the name so a background tab shows whether
+        // its agent is mid-turn or back at the prompt.
+        let name = crate::agent_status::prefix_name(&tab.name, tab.agent_activity());
         let label = if tab.zoomed {
-            format!(" {} [F] ", tab.name)
+            format!(" {name} [F] ")
         } else {
-            format!(" {} ", tab.name)
+            format!(" {name} ")
         };
         let width = label.chars().count();
         if used + width > cols {
@@ -196,9 +206,7 @@ pub fn tab_at(session: &Session, cols: u16, x: u16) -> Option<usize> {
     tab_bar_layout(session, cols)
         .1
         .into_iter()
-        .find(|(_, label, start)| {
-            x >= *start && x < start + label.chars().count() as u16
-        })
+        .find(|(_, label, start)| x >= *start && x < start + label.chars().count() as u16)
         .map(|(i, _, _)| i)
 }
 
@@ -228,7 +236,11 @@ fn draw_dividers(
     }
 
     // Dim pass for dividers away from the focused pane...
-    queue!(out, SetAttribute(Attribute::Reset), SetAttribute(Attribute::Dim))?;
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        SetAttribute(Attribute::Dim)
+    )?;
     for (&(x, y), &(bits, real)) in &cells {
         if !real || focused.is_some_and(|f| touches(f, x, y)) {
             continue;
@@ -252,10 +264,10 @@ fn draw_dividers(
     // centered on the shared edge and pointing into the pane.
     if let Some(f) = focused {
         let sides: [(bool, Option<u16>, u16, u16, char); 4] = [
-            (true, f.x.checked_sub(1), f.y, f.h, '▸'), // left divider
-            (true, Some(f.x + f.w), f.y, f.h, '◂'),    // right divider
+            (true, f.x.checked_sub(1), f.y, f.h, '▸'),  // left divider
+            (true, Some(f.x + f.w), f.y, f.h, '◂'),     // right divider
             (false, f.y.checked_sub(1), f.x, f.w, '▾'), // top divider
-            (false, Some(f.y + f.h), f.x, f.w, '▴'),   // bottom divider
+            (false, Some(f.y + f.h), f.x, f.w, '▴'),    // bottom divider
         ];
         for (vertical, fixed, lo, len, glyph) in sides {
             let Some(fixed) = fixed else { continue };
@@ -264,7 +276,11 @@ fn draw_dividers(
             }
         }
     }
-    queue!(out, SetAttribute(Attribute::Reset), SetForegroundColor(Color::Reset))?;
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(Color::Reset)
+    )?;
     Ok(())
 }
 
@@ -283,7 +299,11 @@ fn arrow_cell(
     if len == 0 {
         return None;
     }
-    let plain = if vertical { B_UP | B_DOWN } else { B_LEFT | B_RIGHT };
+    let plain = if vertical {
+        B_UP | B_DOWN
+    } else {
+        B_LEFT | B_RIGHT
+    };
     let pos = |v: u16| if vertical { (fixed, v) } else { (v, fixed) };
     let center = lo + (len - 1) / 2;
     // Center first, then nudge outward in both directions.
@@ -312,7 +332,11 @@ fn touches(f: Rect, x: u16, y: u16) -> bool {
     on_vertical || on_horizontal
 }
 
-pub(crate) fn collect_dividers(layout: &Layout, rect: Rect, cells: &mut HashMap<(u16, u16), (u8, bool)>) {
+pub(crate) fn collect_dividers(
+    layout: &Layout,
+    rect: Rect,
+    cells: &mut HashMap<(u16, u16), (u8, bool)>,
+) {
     let Layout::Split { dir, a, b } = layout else {
         return;
     };
@@ -373,6 +397,8 @@ pub struct ListItem {
     pub active: bool,
     /// Rendered dim (e.g. a pinned session that isn't running).
     pub dim: bool,
+    /// Agent activity drawn as a mark ahead of the label.
+    pub agent: Option<crate::agent_status::AgentActivity>,
 }
 
 /// A centered, rounded panel geometry for the overlays.
@@ -480,7 +506,7 @@ pub fn draw_manager(
 
     let min_interior = items
         .iter()
-        .map(|i| i.label.chars().count() + 2)
+        .map(|i| i.label.chars().count() + 2 + crate::agent_status::mark_columns(i.agent))
         .chain([footer.chars().count(), min_interior])
         .max()
         .unwrap_or(0);
@@ -524,7 +550,27 @@ pub fn draw_manager(
         }
         // The open session/tab is named in the accent color; the ❯
         // above marks where the cursor sits, so the two signals stay
-        // independent.
+        // independent. A working agent takes the accent mark; a
+        // finished one stays dim so the busy rows are the ones that
+        // read as live.
+        let mark_cols = crate::agent_status::mark_columns(item.agent);
+        if let Some(state) = item.agent {
+            if state == crate::agent_status::AgentActivity::Working {
+                queue!(
+                    out,
+                    SetForegroundColor(accent),
+                    SetAttribute(Attribute::Bold)
+                )?;
+            } else if !is_selected {
+                queue!(out, SetAttribute(Attribute::Dim))?;
+            }
+            queue!(
+                out,
+                Print(crate::agent_status::mark(Some(state))),
+                Print(" "),
+                SetAttribute(Attribute::Reset),
+            )?;
+        }
         queue!(
             out,
             SetForegroundColor(if item.active { accent } else { Color::Reset }),
@@ -532,9 +578,15 @@ pub fn draw_manager(
         if item.dim && !is_selected {
             queue!(out, SetAttribute(Attribute::Dim))?;
         }
+        if is_selected {
+            queue!(out, SetAttribute(Attribute::Bold))?;
+        }
         queue!(
             out,
-            Print(fit(&item.label, panel.iw.saturating_sub(2))),
+            Print(fit(
+                &item.label,
+                (panel.iw as usize).saturating_sub(2 + mark_cols),
+            )),
             SetAttribute(Attribute::Reset),
             SetForegroundColor(Color::Reset),
         )?;
@@ -586,7 +638,9 @@ pub fn draw_naming(
             .saturating_sub(width - 1)
             .min(chars.len().saturating_sub(width))
     };
-    let visible: String = chars[start..(start + width).min(chars.len())].iter().collect();
+    let visible: String = chars[start..(start + width).min(chars.len())]
+        .iter()
+        .collect();
 
     queue!(
         out,
@@ -836,7 +890,12 @@ mod tests {
         .unwrap();
         term.vt_write(b"hello");
         let mut renderer = Renderer::new().unwrap();
-        let rect = Rect { x: 0, y: 0, w: 20, h: 3 };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 3,
+        };
         let mut paint = |full: bool| {
             let mut buf = Vec::new();
             renderer.draw_at(&term, &mut buf, rect, full).unwrap();

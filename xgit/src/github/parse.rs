@@ -1,7 +1,58 @@
 use serde_json::Value;
 
-use crate::model::{Comment, HydratedItem, IssueLink, ItemState, Kind, Label, LinkKind, Review};
+use crate::model::{
+    Comment, HydratedItem, IssueLink, ItemState, Kind, Label, LinkKind, RepoRow, Review,
+    is_dependabot,
+};
 use crate::refs::extract_refs;
+
+/// One node of `viewer.repositories`. `unread` is filled in from the local
+/// cache when the list is read back out of the database.
+///
+/// The PR split is computed from the sampled author list: anything past the
+/// sample counts as human, so a repo with more open PRs than the sample
+/// under-reports Dependabot rather than inventing bot PRs.
+pub fn owned_repo_from_value(v: &Value) -> Option<RepoRow> {
+    let name = v.get("name").and_then(Value::as_str)?.to_string();
+    let owner = v
+        .pointer("/owner/login")
+        .and_then(Value::as_str)?
+        .to_string();
+    let total_prs = v
+        .pointer("/pullRequests/totalCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let bot_prs = v
+        .pointer("/pullRequests/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| {
+                    n.pointer("/author/login")
+                        .and_then(Value::as_str)
+                        .is_some_and(is_dependabot)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+        .min(total_prs);
+    Some(RepoRow {
+        owner,
+        name,
+        open_prs: total_prs - bot_prs,
+        bot_prs,
+        open_issues: v
+            .pointer("/issues/totalCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+        unread: 0,
+        updated_at: v
+            .get("pushedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
 
 pub fn item_from_value(v: &Value) -> Option<HydratedItem> {
     if v.is_null() {
@@ -443,6 +494,49 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, LinkKind::Closes);
         assert_eq!(hits[0].title.as_deref(), Some("memory analytics"));
+    }
+
+    #[test]
+    fn parse_owned_repo_splits_dependabot() {
+        let v = json!({
+            "name": "xgit",
+            "pushedAt": "2026-09-10T00:00:00Z",
+            "owner": { "login": "zveinn" },
+            "pullRequests": {
+                "totalCount": 4,
+                "nodes": [
+                    { "author": { "login": "dependabot" } },
+                    { "author": { "login": "dependabot" } },
+                    { "author": { "login": "zveinn" } },
+                    { "author": null }
+                ]
+            },
+            "issues": { "totalCount": 7 }
+        });
+        let repo = owned_repo_from_value(&v).unwrap();
+        assert_eq!(repo.full_name(), "zveinn/xgit");
+        assert_eq!(repo.bot_prs, 2);
+        assert_eq!(repo.open_prs, 2, "totalCount minus the bots");
+        assert_eq!(repo.total_prs(), 4);
+        assert_eq!(repo.open_issues, 7);
+        assert_eq!(repo.unread, 0);
+        assert_eq!(repo.updated_at.as_deref(), Some("2026-09-10T00:00:00Z"));
+        assert!(owned_repo_from_value(&json!({ "name": "no-owner" })).is_none());
+    }
+
+    /// Past the sampled page the authors are unknown, so the remainder counts
+    /// as human rather than inflating the bot column.
+    #[test]
+    fn parse_owned_repo_without_pr_nodes() {
+        let v = json!({
+            "name": "big",
+            "owner": { "login": "zveinn" },
+            "pullRequests": { "totalCount": 250 },
+            "issues": { "totalCount": 0 }
+        });
+        let repo = owned_repo_from_value(&v).unwrap();
+        assert_eq!(repo.open_prs, 250);
+        assert_eq!(repo.bot_prs, 0);
     }
 
     #[test]

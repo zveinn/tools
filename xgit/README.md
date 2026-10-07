@@ -63,22 +63,76 @@ Preview — `i` opens a right-hand pane with people, review progress, and the bo
 | **Closed PRs** | Closed and merged pull requests. Time filter applies (`r` sync windows). |
 | **All Issues** | Open issues you are involved in. Linked PRs nest under an issue the same way issues nest under PRs. |
 | **Closed Issues** | Closed issues, with the same linked-PR nesting. |
+| **Seen Repos** | Every repo in the local cache, most open PRs first. `enter` opens one. |
+| **My Repos** | Every repo you own, most open PRs first. |
 
 Move between menus with `h` / `l` (or the arrow keys).
 
+## Repos
+
+Both repo menus use the same columns and sort by open PRs, so the busiest repo
+is on top — they differ only in where the rows and counts come from.
+
+`open PRs` counts **human authors only**. Dependabot gets its own `deps`
+column, and the sort keys off the human count first, then open issues, so a
+repo buried in dependency bumps cannot outrank one with real work waiting. The
+preview (`i`) shows the split and the combined total.
+
+**Seen Repos** is the local cache: repos xgit has an issue or PR for, counted
+by **your involvement** rather than the repository totals.
+
+**My Repos** is the list of repos you own personally, fetched from GitHub the
+first time you open the tab (`r` → *this item* refetches) and cached locally
+after that. Its open PR and issue counts are GitHub's **repo-wide** totals;
+`unread` still comes from your cache. Org repos and repos you only contribute
+to are not owned, so they only appear under Seen Repos.
+
+The Dependabot split samples up to 100 open PRs per repo. Past that the
+authors are not inspected and the remainder counts as human, so a repo with
+more than 100 open PRs under-reports `deps` rather than guessing.
+
+`enter` on a repo in either menu replaces the top menu with a bar for that
+repo: its name on the far left, then its own `PRs`, `Issues`, and `Actions`
+tabs. `h` / `l` moves between those three, `esc` goes back to the menu you came
+from with that repo still selected.
+
+### Inside a repo
+
+Opening a repo fetches it from GitHub — **nothing here is cached**. One GraphQL
+call brings back the open PRs and issues by *everyone*, not just the ones you
+are involved in, and one REST call brings the 30 latest workflow runs. Leaving
+the repo throws it all away, so re-entering shows the repository as it is at
+that moment. `r` → *this item* refetches without leaving.
+
+The repo bar shows GitHub's open totals. The lists hold the 50 most recently
+updated of each and the title says `of N` when there are more — a busy repo
+with 83 open PRs reads `PRs  1/50 of 83`.
+
+Because these rows are not in the cache:
+
+- the `role` column becomes `author`, which is what tells other people's work
+  apart (your own roles and the review breakdown are in the preview, `i`)
+- `c` fetches comments into the preview without storing them
+- `m` has nothing to mark read
+
+A repo-list filter is parked on the way in — it picked the repo, so it would
+only hide the repo's contents — and restored on the way out. `/` inside a repo
+filters the fetched items by title, number, or author.
+
 | Key | Action |
 |-----|--------|
-| `h` `l` | Previous / next menu |
+| `h` `l` | Previous / next menu (repo tabs inside a repo) |
 | `j` `k` | Move in the list (or scroll the preview when it is focused) |
 | `i` | Open / close the right preview |
 | `tab` | Toggle list / preview focus |
-| `esc` | Close the preview |
+| `esc` | Close the preview, then leave the repo |
 | `/` | Filter title, repo, author, number |
 | `r` | Sync menu: this item, created last 7/30/60/90 days, or all |
 | `t` | Toggle linked items for the selected PR/issue |
 | `T` | Toggle linked items for the whole list |
 | `y` | Copy the GitHub URL (works over SSH) |
-| `o` / `enter` | Open in browser |
+| `o` | Open in browser |
+| `enter` | Open in browser — or open the repo, on a Repos row |
 | `c` | Fetch comments for the selected item |
 | `?` | Help |
 | `q` | Quit |

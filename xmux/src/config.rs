@@ -83,13 +83,21 @@ pub struct Config {
 
 /// The server's controls: config name, default key, action.
 const ACTIONS: [(&str, &str, InputAction); 12] = [
-    ("session-manager", "ctrl+o", InputAction::Manager(Overlay::Sessions { agents: false })),
+    (
+        "session-manager",
+        "ctrl+o",
+        InputAction::Manager(Overlay::Sessions { agents: false }),
+    ),
     ("tab-manager", "ctrl+n", InputAction::Manager(Overlay::Tabs)),
     ("split-horizontal", "ctrl+k", InputAction::SplitH),
     ("split-vertical", "ctrl+l", InputAction::SplitV),
     ("focus-next", "ctrl+t", InputAction::FocusNext),
     ("focus-left", "ctrl+q", InputAction::FocusDir(NavDir::Left)),
-    ("focus-right", "ctrl+w", InputAction::FocusDir(NavDir::Right)),
+    (
+        "focus-right",
+        "ctrl+w",
+        InputAction::FocusDir(NavDir::Right),
+    ),
     ("focus-up", "ctrl+e", InputAction::FocusDir(NavDir::Up)),
     ("focus-down", "ctrl+r", InputAction::FocusDir(NavDir::Down)),
     ("detach", "ctrl+g", InputAction::Detach),
@@ -180,7 +188,10 @@ pub fn load() -> Result<Config, String> {
 
     // Controls: user's key if rebound, else the default.
     for (name, default_key, action) in ACTIONS {
-        let key = raw.keybindings.get(name).map_or(default_key, |k| k.as_str());
+        let key = raw
+            .keybindings
+            .get(name)
+            .map_or(default_key, |k| k.as_str());
         let seqs = parse_key_multi(key)
             .map_err(|e| format!("invalid key \"{key}\" for keybinding \"{name}\": {e}"))?;
         for seq in seqs {
@@ -217,9 +228,8 @@ pub fn load() -> Result<Config, String> {
                 pin.name.trim()
             ));
         }
-        let seqs = parse_key_multi(&pin.key).map_err(|e| {
-            format!("invalid key \"{}\" for session slot {slot}: {e}", pin.key)
-        })?;
+        let seqs = parse_key_multi(&pin.key)
+            .map_err(|e| format!("invalid key \"{}\" for session slot {slot}: {e}", pin.key))?;
         for seq in seqs {
             bindings.push(Binding {
                 seq,
@@ -371,10 +381,7 @@ fn read_config() -> Result<Option<(RawConfig, String)>, String> {
             }
             match std::fs::write(&path, DEFAULT_CONFIG) {
                 Ok(()) => eprintln!("created default config at {}", path.display()),
-                Err(e) => eprintln!(
-                    "could not create default config at {}: {e}",
-                    path.display()
-                ),
+                Err(e) => eprintln!("could not create default config at {}: {e}", path.display()),
             }
             DEFAULT_CONFIG.to_string()
         }
@@ -444,7 +451,10 @@ fn parse_key(spec: &str) -> Result<Vec<u8>, String> {
 
     let mut chars = key[0].chars();
     let (Some(ch), None) = (chars.next(), chars.next()) else {
-        return Err(format!("key must be a single character, got \"{}\"", key[0]));
+        return Err(format!(
+            "key must be a single character, got \"{}\"",
+            key[0]
+        ));
     };
 
     // A binding without modifiers would hijack ordinary typing.
