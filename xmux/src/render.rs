@@ -21,17 +21,94 @@ use libghostty_vt::{
 use std::collections::HashMap;
 
 use crate::Result;
+use crate::agent_status::AgentActivity;
 use crate::model::{Layout, Rect, Session, SplitDir, split_rect};
 
-/// The pane area of a client screen: everything except the bottom tab
-/// bar row. Sessions are laid out and shells sized to this, so it must
-/// be used for split/navigation geometry too.
-pub fn content_size(size: (u16, u16)) -> (u16, u16) {
-    if size.1 >= 2 {
-        (size.0, size.1 - 1)
-    } else {
-        size
+/// One session drawn on the agent bar.
+pub struct AgentBarItem {
+    /// Index into the server's session vec. Clicking the chip switches
+    /// to this session.
+    pub index: usize,
+    pub name: String,
+    pub activity: AgentActivity,
+}
+
+/// Where the tab bar, the agent bar, and the pane area sit on one
+/// client's screen.
+///
+/// `content` is the pane area's size (origin is always the pane area's
+/// own top-left; `content_y` is where that lands on the screen). Bars
+/// are screen rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chrome {
+    pub content: (u16, u16),
+    pub content_y: u16,
+    pub tab_row: Option<u16>,
+    pub agent_row: Option<u16>,
+}
+
+/// Screen geometry for one client.
+///
+/// The tab bar takes one row once the terminal is at least two rows
+/// tall. The agent bar takes a second row when `show_agents` is set
+/// and a content row would still remain; on a two-row screen the tab
+/// bar wins and the agent bar stays hidden. A bar on top shifts the
+/// pane area down. When both bars share an edge, the agent bar sits
+/// on the screen edge and the tab bar stays next to the panes.
+pub fn chrome(size: (u16, u16), tab_top: bool, agent_top: bool, show_agents: bool) -> Chrome {
+    let (cols, rows) = size;
+    let tab = rows >= 2;
+    let agent = show_agents && rows >= 3;
+
+    let mut tab_row = None;
+    let mut agent_row = None;
+
+    // Top edge, outer row first so a shared edge puts the agent bar
+    // on row 0 and the tab bar beside the panes.
+    let mut next_top = 0u16;
+    if agent && agent_top {
+        agent_row = Some(next_top);
+        next_top += 1;
     }
+    if tab && tab_top {
+        tab_row = Some(next_top);
+        next_top += 1;
+    }
+
+    // Bottom edge, outer row first: the agent bar is the last row,
+    // the tab bar the one above it.
+    let agent_bottom = agent && !agent_top;
+    let tab_bottom = tab && !tab_top;
+    if agent_bottom {
+        agent_row = Some(rows - 1);
+    }
+    if tab_bottom {
+        tab_row = Some(rows - 1 - u16::from(agent_bottom));
+    }
+
+    let chrome_rows = u16::from(tab) + u16::from(agent);
+    Chrome {
+        content: (cols, rows.saturating_sub(chrome_rows)),
+        content_y: next_top,
+        tab_row,
+        agent_row,
+    }
+}
+
+/// The pane area of a client screen: everything except the tab bar and,
+/// when `show_agents` is set, the agent bar. Sessions are laid out and
+/// shells sized to this, so it must be used for split/navigation
+/// geometry too. Which edge a bar sits on changes the pane origin, not
+/// this size.
+pub fn content_size(size: (u16, u16), show_agents: bool) -> (u16, u16) {
+    chrome(size, false, false, show_agents).content
+}
+
+/// Whether any session has an agent at work or waiting at its prompt.
+/// The agent bar is shown exactly when this is true (and the screen
+/// has room for it).
+pub fn any_agent(sessions: &[Session]) -> bool {
+    sessions.iter().any(|s| s.agent_activity().is_some())
 }
 
 /// Truncate to `max` display characters, ellipsized.
@@ -44,8 +121,8 @@ fn fit(s: &str, max: usize) -> String {
 }
 
 /// Draw one frame of the viewed session: the active tab's panes at their
-/// rectangles, dim divider lines between them, the bottom tab bar, and
-/// the focused pane's cursor.
+/// rectangles, dim divider lines between them, the tab bar, the agent
+/// bar when `agents` is non-empty, and the focused pane's cursor.
 ///
 /// `full` repaints every cell instead of only the rows the panes marked
 /// dirty. The caller sets it when something outside the panes owns what
@@ -54,20 +131,22 @@ fn fit(s: &str, max: usize) -> String {
 pub fn draw_session(
     renderer: &mut Renderer<'static>,
     session: &Session,
+    agents: &[AgentBarItem],
+    active: usize,
     out: &mut impl Write,
     size: (u16, u16),
     accent: Color,
-    bar_top: bool,
+    tab_top: bool,
+    agent_top: bool,
     synchronized: bool,
     full: bool,
 ) -> Result<()> {
-    let content = content_size(size);
+    let screen = chrome(size, tab_top, agent_top, !agents.is_empty());
     let area = Rect {
         x: 0,
-        // With the bar on top, the pane area shifts down one row.
-        y: u16::from(bar_top && size.1 >= 2),
-        w: content.0,
-        h: content.1,
+        y: screen.content_y,
+        w: screen.content.0,
+        h: screen.content.1,
     };
     let tab = &session.tabs[session.active_tab];
     if synchronized {
@@ -102,9 +181,11 @@ pub fn draw_session(
         draw_dividers(out, &tab.layout, area, focus_rect, accent)?;
     }
 
-    if size.1 >= 2 {
-        let row = if bar_top { 0 } else { size.1 - 1 };
-        draw_tab_bar(out, session, size, accent, row)?;
+    if let Some(row) = screen.tab_row {
+        draw_tab_bar(out, session, size.0, accent, row)?;
+    }
+    if let Some(row) = screen.agent_row {
+        draw_agent_bar(out, agents, active, size.0, accent, row)?;
     }
 
     if let Some((x, y)) = cursor {
@@ -123,12 +204,12 @@ pub fn draw_session(
 fn draw_tab_bar(
     out: &mut impl Write,
     session: &Session,
-    size: (u16, u16),
+    cols: u16,
     accent: Color,
     row: u16,
 ) -> Result<()> {
     queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
-    let (chip, segments) = tab_bar_layout(session, size.0);
+    let (chip, segments) = tab_bar_layout(session, cols);
 
     // Session name as a chip: accent background, terminal-background
     // text (accent foreground + reverse adapts to any theme).
@@ -208,6 +289,64 @@ pub fn tab_at(session: &Session, cols: u16, x: u16) -> Option<usize> {
         .into_iter()
         .find(|(_, label, start)| x >= *start && x < start + label.chars().count() as u16)
         .map(|(i, _, _)| i)
+}
+
+/// The agent bar: one chip per session that has an agent, in session-list
+/// order. The session you're in is an accent chip, the same as the open
+/// tab; the rest are dim. Chips past the right edge are dropped.
+fn draw_agent_bar(
+    out: &mut impl Write,
+    items: &[AgentBarItem],
+    active: usize,
+    cols: u16,
+    accent: Color,
+    row: u16,
+) -> Result<()> {
+    queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
+    for (index, label, _) in agent_bar_layout(items, cols) {
+        if index == active {
+            queue!(
+                out,
+                SetForegroundColor(accent),
+                SetAttribute(Attribute::Reverse),
+            )?;
+        } else {
+            queue!(out, SetAttribute(Attribute::Dim))?;
+        }
+        queue!(out, Print(label), SetAttribute(Attribute::Reset))?;
+    }
+    queue!(out, Clear(ClearType::UntilNewLine))?;
+    Ok(())
+}
+
+/// `(session index, label, start column)` for each agent chip that fits.
+/// Drawing and click hit-testing share this, so they cannot disagree
+/// about where a session is.
+fn agent_bar_layout(items: &[AgentBarItem], cols: u16) -> Vec<(usize, String, u16)> {
+    let cols = cols as usize;
+    let mut used = 0usize;
+    let mut segments = Vec::new();
+    for item in items {
+        // Same label shape as a tab: the list's mark, then the name,
+        // padded like a tab chip.
+        let name = crate::agent_status::prefix_name(&item.name, Some(item.activity));
+        let label = format!(" {name} ");
+        let width = label.chars().count();
+        if used + width > cols {
+            break;
+        }
+        segments.push((item.index, label, used as u16));
+        used += width;
+    }
+    segments
+}
+
+/// The session whose agent-bar chip covers column `x`, if any.
+pub fn agent_at(items: &[AgentBarItem], cols: u16, x: u16) -> Option<usize> {
+    agent_bar_layout(items, cols)
+        .into_iter()
+        .find(|(_, label, start)| x >= *start && x < start + label.chars().count() as u16)
+        .map(|(index, _, _)| index)
 }
 
 // Line-component bits for box-drawing junction resolution.
@@ -905,5 +1044,108 @@ mod tests {
         assert!(paint(false), "first frame paints the pane");
         assert!(!paint(false), "idle pane stays unpainted");
         assert!(paint(true), "a full frame repaints it");
+    }
+
+    fn chip(index: usize, name: &str, activity: AgentActivity) -> AgentBarItem {
+        AgentBarItem {
+            index,
+            name: name.to_string(),
+            activity,
+        }
+    }
+
+    #[test]
+    fn content_shrinks_only_while_an_agent_bar_is_shown() {
+        assert_eq!(content_size((80, 24), false), (80, 23));
+        assert_eq!(content_size((80, 24), true), (80, 22));
+        // Two rows: the tab bar keeps its row and the agent bar stays off.
+        assert_eq!(content_size((80, 2), true), (80, 1));
+        assert_eq!(content_size((80, 1), true), (80, 1));
+    }
+
+    #[test]
+    fn chrome_puts_a_lone_tab_bar_on_the_configured_edge() {
+        let bottom = chrome((80, 24), false, false, false);
+        assert_eq!(bottom.tab_row, Some(23));
+        assert_eq!(bottom.agent_row, None);
+        assert_eq!(bottom.content, (80, 23));
+        assert_eq!(bottom.content_y, 0);
+
+        let top = chrome((80, 24), true, false, false);
+        assert_eq!(top.tab_row, Some(0));
+        assert_eq!(top.content_y, 1);
+        assert_eq!(top.content, (80, 23));
+    }
+
+    #[test]
+    fn chrome_stacks_the_agent_bar_on_the_outer_edge() {
+        let both_bottom = chrome((80, 24), false, false, true);
+        assert_eq!(both_bottom.tab_row, Some(22));
+        assert_eq!(both_bottom.agent_row, Some(23));
+        assert_eq!(both_bottom.content, (80, 22));
+        assert_eq!(both_bottom.content_y, 0);
+
+        let both_top = chrome((80, 24), true, true, true);
+        assert_eq!(both_top.agent_row, Some(0));
+        assert_eq!(both_top.tab_row, Some(1));
+        assert_eq!(both_top.content_y, 2);
+        assert_eq!(both_top.content, (80, 22));
+
+        let agent_top = chrome((80, 24), false, true, true);
+        assert_eq!(agent_top.agent_row, Some(0));
+        assert_eq!(agent_top.tab_row, Some(23));
+        assert_eq!(agent_top.content_y, 1);
+        assert_eq!(agent_top.content, (80, 22));
+
+        let agent_bottom = chrome((80, 24), true, false, true);
+        assert_eq!(agent_bottom.tab_row, Some(0));
+        assert_eq!(agent_bottom.agent_row, Some(23));
+        assert_eq!(agent_bottom.content_y, 1);
+        assert_eq!(agent_bottom.content, (80, 22));
+    }
+
+    #[test]
+    fn agent_bar_labels_match_tabs_and_drop_what_does_not_fit() {
+        let items = vec![
+            chip(3, "work", AgentActivity::Working),
+            chip(1, "notes", AgentActivity::Idle),
+        ];
+        // " ▶ work " is 8 columns, " ✓ notes " is 9.
+        let fit = agent_bar_layout(&items, 17);
+        assert_eq!(fit.len(), 2);
+        assert_eq!(fit[0].0, 3);
+        assert_eq!(fit[0].1, " ▶ work ");
+        assert_eq!(fit[0].2, 0);
+        assert_eq!(fit[1].1, " ✓ notes ");
+        assert_eq!(fit[1].2, 8);
+
+        assert_eq!(agent_bar_layout(&items, 8).len(), 1);
+        assert!(agent_bar_layout(&items, 7).is_empty());
+        assert_eq!(agent_at(&items, 17, 0), Some(3));
+        assert_eq!(agent_at(&items, 17, 7), Some(3));
+        assert_eq!(agent_at(&items, 17, 8), Some(1));
+        assert_eq!(agent_at(&items, 17, 16), Some(1));
+        assert_eq!(agent_at(&items, 17, 17), None);
+    }
+
+    #[test]
+    fn agent_bar_uses_the_tab_bar_colors() {
+        let items = vec![
+            chip(0, "work", AgentActivity::Working),
+            chip(2, "notes", AgentActivity::Idle),
+        ];
+        let mut buf = Vec::new();
+        draw_agent_bar(&mut buf, &items, 0, 40, Color::Cyan, 5).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains(" ▶ work "), "{text:?}");
+        assert!(text.contains(" ✓ notes "), "{text:?}");
+        // MoveTo(0, 5) is the 1-based sequence for that row.
+        assert!(text.contains("\u{1b}[6;1H"), "{text:?}");
+        let work = text.find(" ▶ work ").unwrap();
+        let notes = text.find(" ✓ notes ").unwrap();
+        // Accent reverse on the open session, dim on the other — the
+        // same attributes the tab bar uses for the open and resting tabs.
+        assert!(text[..work].contains("\u{1b}[7m"), "{text:?}");
+        assert!(text[work..notes].contains("\u{1b}[2m"), "{text:?}");
     }
 }

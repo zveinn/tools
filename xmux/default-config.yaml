@@ -17,6 +17,12 @@ select_copy: true
 # tab bar position: bottom (default) or top
 bar_position: bottom
 
+# agent bar position: bottom (default) or top. The bar lists every
+# session that has a working (▶) or idle (✓) agent, and hides when
+# none do. On a shared edge it sits on the screen edge, with the tab
+# bar kept next to the panes.
+agent_bar_position: bottom
+
 terminal_envs:
   TERM: xterm-256color
 

@@ -89,6 +89,10 @@ select_copy: true
 # tab bar position: bottom (default) or top
 bar_position: bottom
 
+# agent bar: bottom (default) or top. Sessions with a working (▶) or
+# idle (✓) agent; hidden when there are none.
+agent_bar_position: bottom
+
 terminal_envs:
   TERM: xterm-256color
 
@@ -147,7 +151,8 @@ swallowed by xmux and never reach the inner shell.
 | Accent color | `accent:` in the config | Hex color for the focused-pane frame, tab chip, and selectors; unset follows your terminal palette's cyan |
 | Rebindable keys | `keybindings:` in the config | Every control chord above can be remapped (`[ctrl+][alt+]<char>` or `F1`–`F12`); bound chords never reach the inner shell |
 | Tab bar position | `bar_position:` in the config | `bottom` (default) or `top`; applies live on config reload |
-| Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, keys, pins, `select_copy`, and `bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
+| Agent bar | `agent_bar_position:` in the config | Every session that has a working (`▶`) or idle (`✓`) agent, drawn like a tab chip (accent on the session you're in, dim otherwise). `bottom` (default) or `top`. Hidden when no session has an agent, and a click switches to that session. On a shared edge it sits on the screen edge |
+| Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, keys, pins, `select_copy`, `bar_position`, and `agent_bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
 | Detach | `ctrl+g` | The session keeps running; reattach with `xmux a` |
 | State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/xmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
 | Auto-run on restore | `ctrl+s` on a pane | Declare a command for the focused pane; it is typed into the restored shell after a server restart. Enter saves, empty clears, esc cancels |

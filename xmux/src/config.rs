@@ -79,6 +79,10 @@ pub struct Config {
     /// Tab bar at the top of the screen (`bar_position: top`) instead
     /// of the default bottom.
     pub bar_top: bool,
+    /// Agent bar at the top of the screen (`agent_bar_position: top`)
+    /// instead of the default bottom. The bar lists every session that
+    /// has a working or idle agent and hides when none do.
+    pub agent_bar_top: bool,
 }
 
 /// The server's controls: config name, default key, action.
@@ -134,6 +138,8 @@ struct RawConfig {
     select_copy: Option<bool>,
     #[serde(default)]
     bar_position: Option<String>,
+    #[serde(default)]
+    agent_bar_position: Option<String>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -162,6 +168,7 @@ pub fn load() -> Result<Config, String> {
             scrollback_lines: None,
             select_copy: None,
             bar_position: None,
+            agent_bar_position: None,
         },
     };
 
@@ -300,15 +307,13 @@ pub fn load() -> Result<Config, String> {
         None => 5000,
     };
 
-    let bar_top = match raw.bar_position.as_deref().map(str::trim) {
-        None | Some("") | Some("bottom") => false,
-        Some("top") => true,
-        Some(other) => {
-            return Err(format!(
-                "invalid bar_position \"{other}\" (expected top or bottom)"
-            ));
-        }
-    };
+    // Absent means bottom for both bars, matching the shipped default.
+    let bar_top = parse_edge(raw.bar_position.as_deref(), false, "bar_position")?;
+    let agent_bar_top = parse_edge(
+        raw.agent_bar_position.as_deref(),
+        false,
+        "agent_bar_position",
+    )?;
 
     Ok(Config {
         bindings,
@@ -320,7 +325,20 @@ pub fn load() -> Result<Config, String> {
         scrollback_lines,
         select_copy: raw.select_copy.unwrap_or(true),
         bar_top,
+        agent_bar_top,
     })
+}
+
+/// `top` or `bottom`. An absent or blank value uses `default_top`.
+fn parse_edge(value: Option<&str>, default_top: bool, field: &str) -> Result<bool, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(default_top),
+        Some("bottom") => Ok(false),
+        Some("top") => Ok(true),
+        Some(other) => Err(format!(
+            "invalid {field} \"{other}\" (expected top or bottom)"
+        )),
+    }
 }
 
 /// Parse `#rrggbb` (or shorthand `#rgb`) into an RGB color.
@@ -476,4 +494,24 @@ fn parse_key(spec: &str) -> Result<Vec<u8>, String> {
         seq.extend_from_slice(ch.to_ascii_lowercase().encode_utf8(&mut buf).as_bytes());
     }
     Ok(seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_edges_default_to_the_bottom() {
+        assert_eq!(parse_edge(None, false, "bar_position").unwrap(), false);
+        assert_eq!(parse_edge(Some(""), false, "bar_position").unwrap(), false);
+        assert_eq!(
+            parse_edge(Some("bottom"), false, "agent_bar_position").unwrap(),
+            false
+        );
+        assert_eq!(
+            parse_edge(Some("top"), false, "bar_position").unwrap(),
+            true
+        );
+        assert!(parse_edge(Some("left"), false, "agent_bar_position").is_err());
+    }
 }

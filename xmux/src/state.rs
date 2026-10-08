@@ -267,7 +267,9 @@ pub fn restore(config: &Config) -> Vec<Session> {
         return Vec::new();
     };
 
-    let size = content_size(RESTORE_SIZE);
+    // Restored shells have no agent titles yet, so the agent bar is
+    // not on screen. Attaching resizes to the client's real chrome.
+    let size = content_size(RESTORE_SIZE, false);
     let full = Rect {
         x: 0,
         y: 0,

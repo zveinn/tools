@@ -20,13 +20,17 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use crate::Result;
 use crate::agent;
 use crate::config::{self, Config};
-use crate::input::{Mode, Overlay, SelectState, handle_input, manager_count, session_entries};
+use crate::input::{
+    Mode, Overlay, SelectState, agent_bar_items, handle_input, manager_count, session_entries,
+};
 use crate::model::Session;
 use crate::protocol::{
     C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK, S2C_BYE,
     S2C_LIST, S2C_OUTPUT, frame, socket_path,
 };
-use crate::render::{ListItem, Renderer, content_size, draw_manager, draw_naming, draw_session};
+use crate::render::{
+    ListItem, Renderer, any_agent, chrome, content_size, draw_manager, draw_naming, draw_session,
+};
 
 /// A slow client gets this much buffered output before being dropped.
 const MAX_OUTBUF: usize = 8 * 1024 * 1024;
@@ -207,6 +211,10 @@ pub fn run() -> Result<()> {
     let mut sessions: Vec<Session> = crate::state::restore(&config);
     resort_sessions(&mut sessions, &config);
     let mut clients: Vec<ClientConn> = Vec::new();
+    // The agent bar takes a row only while some session has an agent.
+    // Restored shells start without one; the first title that classifies
+    // grows the bar and shrinks the pane area.
+    let mut agent_bar_on = any_agent(&sessions);
 
     eprintln!("xmux server listening on {}", socket_path().display());
 
@@ -231,8 +239,9 @@ pub fn run() -> Result<()> {
                         for client in clients.iter_mut() {
                             if client.attached.is_some() && !client.closing && !client.dead {
                                 client.needs_redraw = true;
-                                // `bar-top` moves the whole pane area a
-                                // row, so nothing on screen can be reused.
+                                // Either bar moving to the other edge
+                                // shifts the pane area, so nothing on
+                                // screen can be reused.
                                 client.needs_full = true;
                             }
                         }
@@ -424,6 +433,8 @@ pub fn run() -> Result<()> {
         // Redraw clients viewing sessions whose active tab produced output,
         // and anyone looking at a list whose agent marks just changed —
         // including a background tab, which does not otherwise repaint.
+        // A running client also repaints when *any* session's mark
+        // changes: the agent bar lists every one of them.
         for client in &mut clients {
             let output = client
                 .attached
@@ -433,12 +444,12 @@ pub fn run() -> Result<()> {
                 Mode::Manager {
                     overlay: Overlay::Sessions { .. },
                     ..
-                } => !activity_sessions.is_empty(),
+                }
+                | Mode::Running => !activity_sessions.is_empty(),
                 Mode::Manager {
                     overlay: Overlay::Tabs,
                     ..
-                }
-                | Mode::Running => client
+                } => client
                     .attached
                     .is_some_and(|id| activity_sessions.contains(&id)),
                 _ => false,
@@ -509,7 +520,31 @@ pub fn run() -> Result<()> {
                 if let Some(id) = clients[ci].attached
                     && let Some(si) = sessions.iter().position(|s| s.id == id)
                 {
-                    sessions[si].resize(content_size(clients[ci].size))?;
+                    let pane = content_size(clients[ci].size, any_agent(&sessions));
+                    sessions[si].resize(pane)?;
+                }
+            }
+        }
+
+        // The agent bar appearing or disappearing changes every attached
+        // session's pane height. Do it before the paint so this frame
+        // already shows the new geometry.
+        let show_agents = any_agent(&sessions);
+        if show_agents != agent_bar_on {
+            agent_bar_on = show_agents;
+            for ci in 0..clients.len() {
+                if clients[ci].closing || clients[ci].dead {
+                    continue;
+                }
+                if let Some(id) = clients[ci].attached
+                    && let Some(si) = sessions.iter().position(|s| s.id == id)
+                {
+                    let pane = content_size(clients[ci].size, show_agents);
+                    sessions[si].resize(pane)?;
+                }
+                if clients[ci].attached.is_some() {
+                    clients[ci].needs_redraw = true;
+                    clients[ci].needs_full = true;
                 }
             }
         }
@@ -545,13 +580,17 @@ pub fn run() -> Result<()> {
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             match &clients[ci].mode {
                 Mode::Running => {
+                    let agents = agent_bar_items(&config.pins, &sessions);
                     draw_session(
                         &mut renderer,
                         &sessions[si],
+                        &agents,
+                        si,
                         &mut buf,
                         size,
                         config.accent,
                         config.bar_top,
+                        config.agent_bar_top,
                         // A full frame wipes the screen before painting,
                         // so it has to be atomic even when a pointer-only
                         // repaint would otherwise skip the sync.
@@ -773,14 +812,10 @@ fn handle_frame(
             }
             let size = clients[ci].size;
 
+            let pane = content_size(size, any_agent(sessions));
             let si = match sessions.iter().position(|s| s.name == name) {
                 Some(si) => si,
-                None => crate::input::create_session(
-                    sessions,
-                    config,
-                    crate::render::content_size(size),
-                    name,
-                )?,
+                None => crate::input::create_session(sessions, config, pane, name)?,
             };
             attach_to(ci, si, clients, sessions)?;
         }
@@ -797,12 +832,18 @@ fn handle_frame(
             let mut select = std::mem::take(&mut clients[ci].select);
             let was_settings = matches!(mode, Mode::PaneSettings { .. });
             let overlay_involved = !matches!(mode, Mode::Running);
+            let screen = chrome(
+                size,
+                config.bar_top,
+                config.agent_bar_top,
+                any_agent(sessions),
+            );
             let (detach, copied, mouse_only) = handle_input(
                 &payload,
                 &mut mode,
                 sessions,
                 &mut active,
-                content_size(size),
+                screen,
                 config,
                 &mut select,
             )?;
@@ -889,7 +930,8 @@ fn handle_frame(
             if let Some(id) = clients[ci].attached
                 && let Some(si) = sessions.iter().position(|s| s.id == id)
             {
-                sessions[si].resize(content_size((cols, rows)))?;
+                let pane = content_size((cols, rows), any_agent(sessions));
+                sessions[si].resize(pane)?;
             }
             clients[ci].needs_redraw = true;
             clients[ci].needs_full = true;
@@ -1089,7 +1131,8 @@ fn rehome_homeless_clients(clients: &mut [ClientConn], sessions: &mut [Session])
         clients[ci].mode = Mode::Running;
         clients[ci].needs_redraw = true;
         clients[ci].needs_full = true;
-        sessions[0].resize(content_size(clients[ci].size))?;
+        let pane = content_size(clients[ci].size, any_agent(sessions));
+        sessions[0].resize(pane)?;
     }
     Ok(())
 }
@@ -1109,7 +1152,8 @@ fn attach_to(
         }
     }
     clients[ci].attached = Some(id);
-    sessions[si].resize(content_size(clients[ci].size))?;
+    let pane = content_size(clients[ci].size, any_agent(sessions));
+    sessions[si].resize(pane)?;
     clients[ci].needs_redraw = true;
     clients[ci].needs_full = true;
     Ok(())

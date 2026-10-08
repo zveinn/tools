@@ -103,6 +103,23 @@ pub fn session_entries(pins: &[Pin], sessions: &[Session]) -> Vec<SessionEntry> 
     entries
 }
 
+/// Sessions that belong on the agent bar, in session-list order: any
+/// running session whose panes have an agent at work or at its prompt.
+pub fn agent_bar_items(pins: &[Pin], sessions: &[Session]) -> Vec<crate::render::AgentBarItem> {
+    session_entries(pins, sessions)
+        .into_iter()
+        .filter_map(|entry| {
+            let index = entry.running?;
+            let activity = sessions[index].agent_activity()?;
+            Some(crate::render::AgentBarItem {
+                index,
+                name: entry.name,
+                activity,
+            })
+        })
+        .collect()
+}
+
 /// Create a session, inserting it at its place in the display order:
 /// pinned sessions sit before unpinned ones, in slot order. Returns the
 /// new session's index.
@@ -1309,12 +1326,14 @@ pub fn handle_input(
     mode: &mut Mode,
     sessions: &mut Vec<Session>,
     active: &mut usize,
-    size: (u16, u16),
+    screen: crate::render::Chrome,
     config: &Config,
     select: &mut SelectState,
 ) -> Result<(bool, Option<String>, bool)> {
     use crate::model::SplitDir;
     let bindings: &[Binding] = &config.bindings;
+    // Pane geometry is the content area. Bar rows are screen rows.
+    let size = screen.content;
 
     // Pull mouse and PageUp/PageDown events out of the stream first.
     // An incomplete SGR sequence at the end of the last chunk is
@@ -1352,9 +1371,8 @@ pub fn handle_input(
                     continue;
                 };
 
-                // 1-based screen coords -> 0-based content coords (a
-                // top bar shifts content down a row; the bar itself is
-                // not part of any pane).
+                // 1-based screen coords -> 0-based content coords (bars
+                // shift the pane area down; a bar row is not a pane).
                 let px = x.saturating_sub(1);
 
                 let kind = match event {
@@ -1367,8 +1385,7 @@ pub fn handle_input(
 
                 // The tab bar is xmux's own row: clicking a tab label
                 // opens that tab, and nothing there belongs to a pane.
-                let bar_row = if config.bar_top { 1 } else { size.1 + 1 };
-                if y == bar_row {
+                if screen.tab_row.is_some_and(|row| y == row + 1) {
                     if matches!(kind, 0 | 3) {
                         clear_selection(select, sessions);
                         let session = &mut sessions[*active];
@@ -1379,7 +1396,20 @@ pub fn handle_input(
                     continue;
                 }
 
-                let Some(py) = y.checked_sub(1 + u16::from(config.bar_top)) else {
+                // The agent bar switches sessions the way the tab bar
+                // switches tabs. A click on the row never reaches a pane.
+                if screen.agent_row.is_some_and(|row| y == row + 1) {
+                    if matches!(kind, 0 | 3) {
+                        clear_selection(select, sessions);
+                        let items = agent_bar_items(&config.pins, sessions);
+                        if let Some(si) = crate::render::agent_at(&items, size.0, px) {
+                            *active = si;
+                        }
+                    }
+                    continue;
+                }
+
+                let Some(py) = y.checked_sub(1 + screen.content_y) else {
                     continue;
                 };
                 // Drags and releases belong to the pane the gesture
