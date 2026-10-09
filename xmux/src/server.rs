@@ -19,9 +19,9 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::Result;
 use crate::agent;
-use crate::config::{self, Config};
+use crate::config::{self, Config, Pin};
 use crate::input::{
-    Mode, Overlay, SelectState, agent_bar_items, handle_input, manager_count, session_entries,
+    Mode, Overlay, SelectState, bar_sessions, handle_input, manager_count, session_entries,
 };
 use crate::model::Session;
 use crate::protocol::{
@@ -29,7 +29,7 @@ use crate::protocol::{
     S2C_LIST, S2C_OUTPUT, frame, socket_path,
 };
 use crate::render::{
-    ListItem, Renderer, any_agent, chrome, content_size, draw_manager, draw_naming, draw_session,
+    ListItem, Renderer, bar_layout, chrome, draw_manager, draw_naming, draw_session,
 };
 
 /// A slow client gets this much buffered output before being dropped.
@@ -68,6 +68,9 @@ struct ClientConn {
     /// Set when the last input was pointer-only, so the running-mode
     /// paint can skip a synchronized update (faster to appear, some tearing).
     skip_sync: bool,
+    /// This redraw exists only to advance the highlighted letter in a
+    /// manager. The panel is reprinted in place; the screen is not cleared.
+    letter_only: bool,
     /// A BYE was queued; drop the client once outbuf drains.
     closing: bool,
     /// The socket died; drop the client this iteration.
@@ -88,6 +91,7 @@ impl ClientConn {
             needs_full: true,
             pending_copy: None,
             skip_sync: false,
+            letter_only: false,
             closing: false,
             dead: false,
         }
@@ -211,20 +215,20 @@ pub fn run() -> Result<()> {
     let mut sessions: Vec<Session> = crate::state::restore(&config);
     resort_sessions(&mut sessions, &config);
     let mut clients: Vec<ClientConn> = Vec::new();
-    // The agent bar takes a row only while some session has an agent.
-    // Restored shells start without one; the first title that classifies
-    // grows the bar and shrinks the pane area.
-    let mut agent_bar_on = any_agent(&sessions);
 
     eprintln!("xmux server listening on {}", socket_path().display());
 
     let mut last_mtime = config_mtime();
     let mut last_save = std::time::Instant::now();
     let mut tick: u32 = 0;
+    // Last session-name letter tick painted. usize::MAX so the first
+    // working agent advances it immediately.
+    let mut name_tick: usize = usize::MAX;
 
     loop {
         // ---- Hot-reload the config when the file changes (checked about
-        // once a second). Bindings, accent, and pins apply immediately;
+        // once a second). Bindings, accent, the agent-finished color, and
+        // pins apply immediately;
         // shell/envs affect newly spawned shells. A broken config is
         // rejected and the old one stays active.
         tick = tick.wrapping_add(1);
@@ -239,7 +243,7 @@ pub fn run() -> Result<()> {
                         for client in clients.iter_mut() {
                             if client.attached.is_some() && !client.closing && !client.dead {
                                 client.needs_redraw = true;
-                                // Either bar moving to the other edge
+                                // The bar moving, or a wrap change,
                                 // shifts the pane area, so nothing on
                                 // screen can be reused.
                                 client.needs_full = true;
@@ -434,7 +438,7 @@ pub fn run() -> Result<()> {
         // and anyone looking at a list whose agent marks just changed —
         // including a background tab, which does not otherwise repaint.
         // A running client also repaints when *any* session's mark
-        // changes: the agent bar lists every one of them.
+        // changes: the status bar lists every one of them.
         for client in &mut clients {
             let output = client
                 .attached
@@ -520,31 +524,91 @@ pub fn run() -> Result<()> {
                 if let Some(id) = clients[ci].attached
                     && let Some(si) = sessions.iter().position(|s| s.id == id)
                 {
-                    let pane = content_size(clients[ci].size, any_agent(&sessions));
+                    let pane = pane_size(clients[ci].size, &sessions, si, &config);
                     sessions[si].resize(pane)?;
                 }
             }
         }
 
-        // The agent bar appearing or disappearing changes every attached
-        // session's pane height. Do it before the paint so this frame
-        // already shows the new geometry.
-        let show_agents = any_agent(&sessions);
-        if show_agents != agent_bar_on {
-            agent_bar_on = show_agents;
-            for ci in 0..clients.len() {
-                if clients[ci].closing || clients[ci].dead {
-                    continue;
-                }
-                if let Some(id) = clients[ci].attached
-                    && let Some(si) = sessions.iter().position(|s| s.id == id)
-                {
-                    let pane = content_size(clients[ci].size, show_agents);
-                    sessions[si].resize(pane)?;
-                }
-                if clients[ci].attached.is_some() {
-                    clients[ci].needs_redraw = true;
-                    clients[ci].needs_full = true;
+        // Session chips, tab chips, and agent marks all change how many
+        // rows the status bar wraps to. Resize before the paint so this
+        // frame already shows the new pane height.
+        for ci in 0..clients.len() {
+            if clients[ci].closing || clients[ci].dead {
+                continue;
+            }
+            let Some(id) = clients[ci].attached else {
+                continue;
+            };
+            let Some(si) = sessions.iter().position(|s| s.id == id) else {
+                continue;
+            };
+            let pane = pane_size(clients[ci].size, &sessions, si, &config);
+            if sessions[si].last_size != pane {
+                sessions[si].resize(pane)?;
+                clients[ci].needs_redraw = true;
+                clients[ci].needs_full = true;
+            }
+        }
+
+        // A working → idle rollup is a finished turn. Highlight that
+        // session on the status bar until a client is looking at it
+        // (attached, and not inside an overlay).
+        for session in &mut sessions {
+            let activity = session.agent_activity();
+            session.note_agent_activity(activity);
+            let viewed = clients.iter().any(|client| {
+                client.attached == Some(session.id)
+                    && !client.closing
+                    && !client.dead
+                    && matches!(client.mode, Mode::Running)
+            });
+            if viewed {
+                session.acknowledge_finished();
+            }
+        }
+
+        // Repaint working session names on the 100ms clock. The lit
+        // letter holds for two of these frames, so the walk is half
+        // speed and the bar still paints at the same rate. The text
+        // does not change width, so the bar does not rewrap and a
+        // manager panel can be reprinted in place. The session view
+        // repaints, and so does a session menu that is showing a
+        // working agent — otherwise that letter only changes when the
+        // menu repaints.
+        let tick = crate::agent_status::highlight_tick(std::time::SystemTime::now());
+        if name_tick != tick {
+            name_tick = tick;
+            let any_working = sessions.iter().any(|session| {
+                session.agent_activity() == Some(crate::agent_status::AgentActivity::Working)
+            });
+            if any_working {
+                for client in &mut clients {
+                    let Some(id) = client.attached else {
+                        continue;
+                    };
+                    if client.closing || client.dead {
+                        continue;
+                    }
+                    let animate = if matches!(client.mode, Mode::Running) {
+                        true
+                    } else if matches!(client.mode, Mode::Manager { .. }) {
+                        manager_shows_working(&client.mode, &sessions, &config.pins, id)
+                    } else {
+                        false
+                    };
+                    if !animate {
+                        continue;
+                    }
+                    // A manager tick that is the only reason to paint
+                    // skips the full-screen clear. Any other pending
+                    // redraw still clears, so a selection move in the
+                    // same turn is not painted over a stale panel.
+                    if matches!(client.mode, Mode::Manager { .. }) && !client.needs_redraw {
+                        client.letter_only = true;
+                    }
+                    client.needs_redraw = true;
+                    client.skip_sync = false;
                 }
             }
         }
@@ -558,9 +622,14 @@ pub fn run() -> Result<()> {
             // so we paint the latest state once the socket drains, instead
             // of queuing a backlog of full-screen frames.
             if !clients[ci].outbuf.is_empty() {
+                // The deferred paint may include more than a letter
+                // tick by the time the socket drains.
+                clients[ci].letter_only = false;
                 continue;
             }
             clients[ci].needs_redraw = false;
+            let letter_only = clients[ci].letter_only;
+            clients[ci].letter_only = false;
             let Some(id) = clients[ci].attached else {
                 continue;
             };
@@ -580,17 +649,18 @@ pub fn run() -> Result<()> {
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             match &clients[ci].mode {
                 Mode::Running => {
-                    let agents = agent_bar_items(&config.pins, &sessions);
+                    let items = bar_sessions(&config.pins, &sessions);
                     draw_session(
                         &mut renderer,
                         &sessions[si],
-                        &agents,
+                        &items,
                         si,
                         &mut buf,
                         size,
                         config.accent,
+                        config.agent_color_highlight,
+                        tick,
                         config.bar_top,
-                        config.agent_bar_top,
                         // A full frame wipes the screen before painting,
                         // so it has to be atomic even when a pointer-only
                         // repaint would otherwise skip the sync.
@@ -625,17 +695,16 @@ pub fn run() -> Result<()> {
                                 ),
                                 _ => e.name.clone(),
                             };
-                            min_interior = min_interior.max(
-                                label.chars().count()
-                                    + 2
-                                    + crate::agent_status::mark_columns(activity),
-                            );
+                            min_interior = min_interior.max(label.chars().count() + 2);
                             if query.is_none_or(|q| crate::input::name_matches(&e.name, q)) {
+                                let working_chars = (activity
+                                    == Some(crate::agent_status::AgentActivity::Working))
+                                .then(|| e.name.chars().count());
                                 items.push(ListItem {
                                     label,
                                     active: e.running == Some(si),
                                     dim: e.running.is_none(),
-                                    agent: activity,
+                                    working_chars,
                                 });
                             }
                         }
@@ -664,7 +733,15 @@ pub fn run() -> Result<()> {
                             min_rows: entries.len(),
                             min_interior,
                         };
-                        draw_manager(&mut buf, &view, size, config.accent)?;
+                        draw_manager(
+                            &mut buf,
+                            &view,
+                            size,
+                            config.accent,
+                            config.agent_color_highlight,
+                            tick,
+                            !letter_only,
+                        )?;
                     }
                     Overlay::Tabs => {
                         let session = &sessions[si];
@@ -672,18 +749,13 @@ pub fn run() -> Result<()> {
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for (ti, t) in session.tabs.iter().enumerate() {
-                            let activity = t.agent_activity();
-                            min_interior = min_interior.max(
-                                t.name.chars().count()
-                                    + 2
-                                    + crate::agent_status::mark_columns(activity),
-                            );
+                            min_interior = min_interior.max(t.name.chars().count() + 2);
                             if query.is_none_or(|q| crate::input::name_matches(&t.name, q)) {
                                 items.push(ListItem {
                                     label: t.name.clone(),
                                     active: ti == session.active_tab,
                                     dim: false,
-                                    agent: activity,
+                                    working_chars: None,
                                 });
                             }
                         }
@@ -705,7 +777,15 @@ pub fn run() -> Result<()> {
                             min_rows: session.tabs.len(),
                             min_interior,
                         };
-                        draw_manager(&mut buf, &view, size, config.accent)?;
+                        draw_manager(
+                            &mut buf,
+                            &view,
+                            size,
+                            config.accent,
+                            config.agent_color_highlight,
+                            tick,
+                            !letter_only,
+                        )?;
                     }
                 },
                 Mode::PaneSettings { text } => {
@@ -784,6 +864,56 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Whether this session menu is showing a working session name. A
+/// hidden row (filtered out by `/`) does not count: nothing on screen
+/// would change, so the menu stays still. The tab menu has no session
+/// names to walk.
+fn manager_shows_working(mode: &Mode, sessions: &[Session], pins: &[Pin], _attached: u64) -> bool {
+    let Mode::Manager {
+        overlay, search, ..
+    } = mode
+    else {
+        return false;
+    };
+    let Overlay::Sessions { agents } = overlay else {
+        return false;
+    };
+    let query = search.as_ref().map(|q| q.text.as_str());
+    agent::manager_entries(pins, sessions, *agents)
+        .iter()
+        .any(|entry| {
+            query.is_none_or(|q| crate::input::name_matches(&entry.name, q))
+                && entry.running.is_some_and(|si| {
+                    sessions[si].agent_activity()
+                        == Some(crate::agent_status::AgentActivity::Working)
+                })
+        })
+}
+
+/// Pane area for the client attached to session `si`.
+///
+/// The status bar's height depends on this client's width and on the
+/// session's tabs, so two clients can have different pane heights.
+/// A missing session (one being created) reserves a single bar row;
+/// the following attach resizes to the real wrap.
+fn pane_size(screen: (u16, u16), sessions: &[Session], si: usize, config: &Config) -> (u16, u16) {
+    client_chrome(screen, sessions, si, config).content
+}
+
+fn client_chrome(
+    screen: (u16, u16),
+    sessions: &[Session],
+    si: usize,
+    config: &Config,
+) -> crate::render::Chrome {
+    let items = bar_sessions(&config.pins, sessions);
+    let bar_rows = match sessions.get(si) {
+        Some(session) => bar_layout(&items, session, screen.0, screen.1).rows,
+        None => u16::from(screen.1 >= 2),
+    };
+    chrome(screen, config.bar_top, bar_rows)
+}
+
 /// Handle one protocol frame from client `ci`.
 fn handle_frame(
     ci: usize,
@@ -812,12 +942,17 @@ fn handle_frame(
             }
             let size = clients[ci].size;
 
-            let pane = content_size(size, any_agent(sessions));
             let si = match sessions.iter().position(|s| s.name == name) {
                 Some(si) => si,
-                None => crate::input::create_session(sessions, config, pane, name)?,
+                None => {
+                    // Size the new shell for one bar row; attach_to
+                    // resizes once the session is in the list and its
+                    // real wrap height is known.
+                    let pane = pane_size(size, sessions, sessions.len(), config);
+                    crate::input::create_session(sessions, config, pane, name)?
+                }
             };
-            attach_to(ci, si, clients, sessions)?;
+            attach_to(ci, si, clients, sessions, config)?;
         }
         C2S_INPUT => {
             let Some(id) = clients[ci].attached else {
@@ -832,12 +967,7 @@ fn handle_frame(
             let mut select = std::mem::take(&mut clients[ci].select);
             let was_settings = matches!(mode, Mode::PaneSettings { .. });
             let overlay_involved = !matches!(mode, Mode::Running);
-            let screen = chrome(
-                size,
-                config.bar_top,
-                config.agent_bar_top,
-                any_agent(sessions),
-            );
+            let screen = client_chrome(size, sessions, active, config);
             let (detach, copied, mouse_only) = handle_input(
                 &payload,
                 &mut mode,
@@ -876,13 +1006,13 @@ fn handle_frame(
                 let active = active.min(sessions.len() - 1);
                 if sessions.get(active).map(|s| s.id) != Some(id) {
                     // The manager switched sessions (created, killed, ...).
-                    attach_to(ci, active, clients, sessions)?;
+                    attach_to(ci, active, clients, sessions, config)?;
                 }
             }
 
             // Kills may have orphaned other clients; renames/kills change
             // what everyone's overlays and bars show.
-            rehome_homeless_clients(clients, sessions)?;
+            rehome_homeless_clients(clients, sessions, config)?;
             if overlay_involved {
                 for client in clients.iter_mut() {
                     if client.attached.is_some() && !client.closing && !client.dead {
@@ -909,7 +1039,7 @@ fn handle_frame(
             // One-shot request: close once the reply drains.
             clients[ci].closing = true;
             if sessions_changed {
-                rehome_homeless_clients(clients, sessions)?;
+                rehome_homeless_clients(clients, sessions, config)?;
                 for client in clients.iter_mut() {
                     if client.attached.is_some() && !client.closing && !client.dead {
                         client.needs_redraw = true;
@@ -930,7 +1060,7 @@ fn handle_frame(
             if let Some(id) = clients[ci].attached
                 && let Some(si) = sessions.iter().position(|s| s.id == id)
             {
-                let pane = content_size((cols, rows), any_agent(sessions));
+                let pane = pane_size((cols, rows), sessions, si, config);
                 sessions[si].resize(pane)?;
             }
             clients[ci].needs_redraw = true;
@@ -963,12 +1093,6 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
         .map(|e| e.name.chars().count())
         .max()
         .unwrap_or(0);
-    // A status column only appears once some session actually has an
-    // agent, so a listing with none of them stays as it was.
-    let show_agents = entries.iter().any(|e| {
-        e.running
-            .is_some_and(|si| sessions[si].agent_activity().is_some())
-    });
 
     for entry in &entries {
         let write = (|| -> crate::Result<()> {
@@ -1002,30 +1126,6 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
                             SetAttribute(Attribute::Reset),
                             Print(&padded),
                         )?;
-                    }
-                    if show_agents {
-                        match session.agent_activity() {
-                            Some(crate::agent_status::AgentActivity::Working) => {
-                                queue!(
-                                    out,
-                                    Print("  "),
-                                    SetForegroundColor(config.accent),
-                                    Print("▶"),
-                                    SetForegroundColor(Color::Reset),
-                                )?;
-                            }
-                            Some(crate::agent_status::AgentActivity::Idle) => {
-                                queue!(
-                                    out,
-                                    SetAttribute(Attribute::Dim),
-                                    Print("  ✓"),
-                                    SetAttribute(Attribute::Reset),
-                                )?;
-                            }
-                            None => {
-                                queue!(out, Print("   "))?;
-                            }
-                        }
                     }
                     queue!(
                         out,
@@ -1112,7 +1212,11 @@ fn osc52_to(register: char, text: &str) -> Vec<u8> {
 
 /// Clients whose session vanished (killed from a manager) fall back to
 /// the first surviving session, or get a goodbye when none remain.
-fn rehome_homeless_clients(clients: &mut [ClientConn], sessions: &mut [Session]) -> Result<()> {
+fn rehome_homeless_clients(
+    clients: &mut [ClientConn],
+    sessions: &mut [Session],
+    config: &Config,
+) -> Result<()> {
     for ci in 0..clients.len() {
         if clients[ci].closing || clients[ci].dead {
             continue;
@@ -1131,7 +1235,7 @@ fn rehome_homeless_clients(clients: &mut [ClientConn], sessions: &mut [Session])
         clients[ci].mode = Mode::Running;
         clients[ci].needs_redraw = true;
         clients[ci].needs_full = true;
-        let pane = content_size(clients[ci].size, any_agent(sessions));
+        let pane = pane_size(clients[ci].size, sessions, 0, config);
         sessions[0].resize(pane)?;
     }
     Ok(())
@@ -1144,6 +1248,7 @@ fn attach_to(
     si: usize,
     clients: &mut [ClientConn],
     sessions: &mut [Session],
+    config: &Config,
 ) -> Result<()> {
     let id = sessions[si].id;
     for cj in 0..clients.len() {
@@ -1152,7 +1257,7 @@ fn attach_to(
         }
     }
     clients[ci].attached = Some(id);
-    let pane = content_size(clients[ci].size, any_agent(sessions));
+    let pane = pane_size(clients[ci].size, sessions, si, config);
     sessions[si].resize(pane)?;
     clients[ci].needs_redraw = true;
     clients[ci].needs_full = true;

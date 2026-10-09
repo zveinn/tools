@@ -446,23 +446,13 @@ fn render_text(session: &Session, ti: usize) -> Result<String> {
         out.push_str(row.concat().trim_end());
         out.push('\n');
     }
-    // Tab-bar line, with the rendered tab bracketed. Agent marks use
-    // the same glyphs as the on-screen tab bar.
-    let session_mark = crate::agent_status::mark(session.agent_activity());
-    if session_mark.is_empty() {
-        out.push_str(&format!("== session \"{}\" · tabs:", session.name));
-    } else {
-        out.push_str(&format!(
-            "== session {session_mark} \"{}\" · tabs:",
-            session.name
-        ));
-    }
+    // Tab-bar line, with the rendered tab bracketed.
+    out.push_str(&format!("== session \"{}\" · tabs:", session.name));
     for (i, t) in session.tabs.iter().enumerate() {
-        let name = crate::agent_status::prefix_name(&t.name, t.agent_activity());
         if i == ti {
-            out.push_str(&format!(" [{name}]"));
+            out.push_str(&format!(" [{}]", t.name));
         } else {
-            out.push_str(&format!(" {name}"));
+            out.push_str(&format!(" {}", t.name));
         }
     }
     out.push_str(" ==\n");

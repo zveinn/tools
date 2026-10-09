@@ -263,6 +263,13 @@ pub struct Session {
     /// The content size the session was last laid out for (its client's
     /// size, or the agent default when never attached).
     pub last_size: (u16, u16),
+    /// Rolled-up activity last passed to [`Self::note_agent_activity`].
+    /// Compared with the new value to notice a working → idle transition.
+    pub(crate) last_agent_activity: Option<AgentActivity>,
+    /// The agent finished a turn (working → idle) and no client is
+    /// viewing this session yet. The status bar paints that session
+    /// chip with the `agent_color_highlight` background.
+    pub finished_unseen: bool,
 }
 
 impl Pane {
@@ -392,17 +399,6 @@ impl Tab {
 
     pub fn is_empty(&self) -> bool {
         matches!(self.layout, Layout::Empty)
-    }
-
-    /// Working if any pane is mid-turn, else idle if any pane has an
-    /// agent sitting at its prompt.
-    pub fn agent_activity(&self) -> Option<AgentActivity> {
-        agent_status::rollup(
-            self.layout
-                .panes()
-                .into_iter()
-                .map(|pane| pane.agent_activity()),
-        )
     }
 
     /// Resize every pane to its rectangle in the current layout — or,
@@ -600,6 +596,8 @@ impl Session {
             agent: false,
             last_activity: std::time::Instant::now(),
             last_size: size,
+            last_agent_activity: None,
+            finished_unseen: false,
         })
     }
 
@@ -613,7 +611,33 @@ impl Session {
             agent: false,
             last_activity: std::time::Instant::now(),
             last_size: size,
+            last_agent_activity: None,
+            finished_unseen: false,
         }
+    }
+
+    /// Record the session's rolled-up agent activity. A working → idle
+    /// change is a finished turn: the status bar highlights it until
+    /// [`Self::acknowledge_finished`]. Opening already at the prompt is
+    /// not a finish, and starting another turn or the agent leaving
+    /// clears a highlight that no longer applies.
+    pub fn note_agent_activity(&mut self, now: Option<AgentActivity>) {
+        let prev = self.last_agent_activity;
+        if prev == now {
+            return;
+        }
+        self.last_agent_activity = now;
+        if prev == Some(AgentActivity::Working) && now == Some(AgentActivity::Idle) {
+            self.finished_unseen = true;
+        } else if now != Some(AgentActivity::Idle) {
+            self.finished_unseen = false;
+        }
+    }
+
+    /// The finished-turn highlight has been seen: a client is viewing
+    /// this session. Staying idle afterwards does not highlight again.
+    pub fn acknowledge_finished(&mut self) {
+        self.finished_unseen = false;
     }
 
     /// Working if any pane in any tab is mid-turn, else idle if any
@@ -633,5 +657,68 @@ impl Session {
             tab.apply_layout(size)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare_session() -> Session {
+        Session {
+            id: 0,
+            name: "work".to_string(),
+            tabs: vec![],
+            active_tab: 0,
+            agent: false,
+            last_activity: std::time::Instant::now(),
+            last_size: (80, 24),
+            last_agent_activity: None,
+            finished_unseen: false,
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_highlights_until_the_session_is_viewed() {
+        let mut session = bare_session();
+        session.note_agent_activity(Some(AgentActivity::Idle));
+        assert!(
+            !session.finished_unseen,
+            "opening at the prompt is not a finish"
+        );
+
+        session.note_agent_activity(Some(AgentActivity::Working));
+        assert!(!session.finished_unseen);
+
+        session.note_agent_activity(Some(AgentActivity::Idle));
+        assert!(session.finished_unseen);
+
+        session.note_agent_activity(Some(AgentActivity::Idle));
+        assert!(session.finished_unseen, "staying idle keeps the highlight");
+
+        session.acknowledge_finished();
+        assert!(!session.finished_unseen);
+
+        session.note_agent_activity(Some(AgentActivity::Idle));
+        assert!(
+            !session.finished_unseen,
+            "already idle does not highlight again"
+        );
+
+        session.note_agent_activity(Some(AgentActivity::Working));
+        session.note_agent_activity(None);
+        assert!(
+            !session.finished_unseen,
+            "the agent leaving is not a finish"
+        );
+
+        session.note_agent_activity(Some(AgentActivity::Working));
+        session.note_agent_activity(Some(AgentActivity::Idle));
+        assert!(session.finished_unseen);
+        session.note_agent_activity(Some(AgentActivity::Working));
+        assert!(
+            !session.finished_unseen,
+            "working again clears the highlight"
+        );
     }
 }

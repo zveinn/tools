@@ -61,6 +61,8 @@ pub enum InputAction {
     SplitV,
     /// Move focus to the next pane.
     FocusNext,
+    /// Jump to the next agent session highlighted as just-finished.
+    NextFinished,
     /// Move focus directionally.
     FocusDir(NavDir),
     /// Detach the client from the server.
@@ -103,21 +105,61 @@ pub fn session_entries(pins: &[Pin], sessions: &[Session]) -> Vec<SessionEntry> 
     entries
 }
 
-/// Sessions that belong on the agent bar, in session-list order: any
-/// running session whose panes have an agent at work or at its prompt.
-pub fn agent_bar_items(pins: &[Pin], sessions: &[Session]) -> Vec<crate::render::AgentBarItem> {
+/// Every session on the status bar, in session-list order: pins (running
+/// or not), then other running sessions, then agent sessions. `finished`
+/// is set when that session's agent just went working → idle and nobody
+/// is viewing it.
+pub fn bar_sessions(pins: &[Pin], sessions: &[Session]) -> Vec<crate::render::BarSession> {
     session_entries(pins, sessions)
         .into_iter()
-        .filter_map(|entry| {
-            let index = entry.running?;
-            let activity = sessions[index].agent_activity()?;
-            Some(crate::render::AgentBarItem {
-                index,
+        .map(|entry| {
+            let (activity, finished) = match entry.running {
+                Some(index) => (
+                    sessions[index].agent_activity(),
+                    sessions[index].finished_unseen,
+                ),
+                None => (None, false),
+            };
+            crate::render::BarSession {
+                index: entry.running,
+                pin: pins.iter().position(|pin| pin.name == entry.name),
                 name: entry.name,
                 activity,
-            })
+                finished,
+            }
         })
         .collect()
+}
+
+/// The next highlighted agent session after `active`, in status-bar
+/// order, wrapping around.
+///
+/// Highlighted means an agent session whose agent just finished a turn
+/// (`finished_unseen`): the bar paints that chip with the finished
+/// background. The session already on screen is not a candidate.
+/// `None` when nothing qualifies.
+pub fn next_finished_agent(pins: &[Pin], sessions: &[Session], active: usize) -> Option<usize> {
+    let mut order = Vec::new();
+    for item in bar_sessions(pins, sessions) {
+        if let Some(index) = item.index
+            && !order.contains(&index)
+        {
+            order.push(index);
+        }
+    }
+    let n = order.len();
+    if n == 0 {
+        return None;
+    }
+    let start = order
+        .iter()
+        .position(|&index| index == active)
+        .map_or(0, |pos| pos + 1);
+    (0..n).find_map(|step| {
+        let index = order[(start + step) % n];
+        let session = &sessions[index];
+        (session.agent && session.finished_unseen && index != active).then_some(index)
+    })
 }
 
 /// Create a session, inserting it at its place in the display order:
@@ -378,7 +420,7 @@ pub(crate) fn compact_mouse_input(buf: &[u8], tail: &mut Vec<u8>) -> Vec<u8> {
 }
 
 /// Pane rectangles of a session's visible tab, in content coordinates
-/// (the tab bar is already excluded by `size`).
+/// (the status bar is already excluded by `size`).
 fn tab_rects(session: &Session, size: (u16, u16)) -> Vec<(u64, Rect)> {
     let tab = &session.tabs[session.active_tab];
     let full = Rect {
@@ -1383,30 +1425,50 @@ pub fn handle_input(
                     _ => 4, // wheel
                 };
 
-                // The tab bar is xmux's own row: clicking a tab label
-                // opens that tab, and nothing there belongs to a pane.
-                if screen.tab_row.is_some_and(|row| y == row + 1) {
-                    if matches!(kind, 0 | 3) {
-                        clear_selection(select, sessions);
-                        let session = &mut sessions[*active];
-                        if let Some(ti) = crate::render::tab_at(session, size.0, px) {
-                            session.active_tab = ti;
+                // The status bar is xmux's own rows. A tab chip opens
+                // that tab, a session chip switches to it (or starts a
+                // stopped pin), and nothing there belongs to a pane.
+                if let Some(origin) = screen.bar_row {
+                    let y0 = y.saturating_sub(1);
+                    if y0 >= origin && y0 < origin + screen.bar_rows {
+                        if matches!(kind, 0 | 3) {
+                            clear_selection(select, sessions);
+                            let items = bar_sessions(&config.pins, sessions);
+                            let screen_rows = size.1 + screen.bar_rows;
+                            let hit = crate::render::bar_hit(
+                                &items,
+                                &sessions[*active],
+                                size.0,
+                                screen_rows,
+                                y0 - origin,
+                                px,
+                            );
+                            match hit {
+                                Some(crate::render::BarHit::Tab(ti)) => {
+                                    sessions[*active].active_tab = ti;
+                                }
+                                Some(crate::render::BarHit::Session(si)) => *active = si,
+                                Some(crate::render::BarHit::Pin(pi)) => {
+                                    if let Some(pin) = config.pins.get(pi) {
+                                        *active = match sessions
+                                            .iter()
+                                            .position(|s| s.name == pin.name)
+                                        {
+                                            Some(si) => si,
+                                            None => create_session(
+                                                sessions,
+                                                config,
+                                                size,
+                                                pin.name.clone(),
+                                            )?,
+                                        };
+                                    }
+                                }
+                                None => {}
+                            }
                         }
+                        continue;
                     }
-                    continue;
-                }
-
-                // The agent bar switches sessions the way the tab bar
-                // switches tabs. A click on the row never reaches a pane.
-                if screen.agent_row.is_some_and(|row| y == row + 1) {
-                    if matches!(kind, 0 | 3) {
-                        clear_selection(select, sessions);
-                        let items = agent_bar_items(&config.pins, sessions);
-                        if let Some(si) = crate::render::agent_at(&items, size.0, px) {
-                            *active = si;
-                        }
-                    }
-                    continue;
                 }
 
                 let Some(py) = y.checked_sub(1 + screen.content_y) else {
@@ -1545,6 +1607,11 @@ pub fn handle_input(
                                 Some(si) => si,
                                 None => create_session(sessions, config, size, pin.name.clone())?,
                             };
+                        }
+                    }
+                    InputAction::NextFinished => {
+                        if let Some(si) = next_finished_agent(&config.pins, sessions, *active) {
+                            *active = si;
                         }
                     }
                     InputAction::Fullscreen => {
@@ -1774,6 +1841,8 @@ mod tests {
             agent,
             last_activity: Instant::now() - Duration::from_secs(age_secs),
             last_size: (80, 24),
+            last_agent_activity: None,
+            finished_unseen: false,
         }
     }
 
@@ -1839,6 +1908,42 @@ mod tests {
         assert_eq!(manager_count(overlay, &sessions, 0, &pins), 3);
         assert_eq!(manager_cursor(overlay, &sessions, 0, &pins), 1); // work, after stopped meow
         assert_eq!(manager_cursor(overlay, &sessions, 1, &pins), 2); // notes
+    }
+
+    #[test]
+    fn next_finished_walks_highlighted_agents_in_bar_order() {
+        let pins = vec![Pin {
+            name: "meow".to_string(),
+        }];
+        // Bar order: meow, work, notes, then agents by recency
+        // (fresh, build, idle).
+        let mut sessions = vec![
+            session("meow", false, 0),
+            session("work", false, 0),
+            session("build", true, 5),
+            session("notes", false, 0),
+            session("fresh", true, 1),
+            session("idle", true, 30),
+        ];
+        // A highlighted normal session is not a target.
+        sessions[1].finished_unseen = true;
+        sessions[2].finished_unseen = true;
+        sessions[4].finished_unseen = true;
+
+        assert_eq!(next_finished_agent(&pins, &sessions, 0), Some(4)); // fresh
+        assert_eq!(next_finished_agent(&pins, &sessions, 4), Some(2)); // build
+        assert_eq!(next_finished_agent(&pins, &sessions, 2), Some(4)); // wrap
+        assert_eq!(next_finished_agent(&pins, &sessions, 3), Some(4)); // notes
+        assert_eq!(next_finished_agent(&pins, &sessions, 5), Some(4)); // idle
+
+        sessions[2].finished_unseen = false;
+        sessions[4].finished_unseen = false;
+        assert_eq!(next_finished_agent(&pins, &sessions, 0), None);
+
+        // The session on screen is not a candidate, even while its
+        // highlight is still set.
+        sessions[4].finished_unseen = true;
+        assert_eq!(next_finished_agent(&pins, &sessions, 4), None);
     }
 
     #[test]

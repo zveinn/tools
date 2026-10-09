@@ -1,9 +1,10 @@
-//! Working / finished marks for LLM agents running inside panes.
+//! Working / idle state for LLM agents running inside panes.
 //!
 //! Grok and Claude Code publish their state as the pane's window title
 //! (OSC 0 / OSC 2). libghostty already parses that into `Terminal::title`;
-//! this module turns the string into a stable mark so a spinner frame
-//! does not repaint the tab bar on every tick.
+//! this module turns the string into a stable activity so a title
+//! spinner does not repaint the bar on every tick. A working session
+//! name is highlighted one letter at a time from [`highlight_tick`].
 //!
 //! Grammars, from the programs themselves:
 //!
@@ -25,28 +26,37 @@ pub enum AgentActivity {
     Idle,
 }
 
-/// One-column mark for a list or tab label. Empty when there is no agent.
-pub fn mark(activity: Option<AgentActivity>) -> &'static str {
-    match activity {
-        Some(AgentActivity::Working) => "▶",
-        Some(AgentActivity::Idle) => "✓",
-        None => "",
-    }
+/// How often the bar repaints a working session name. The lit letter
+/// does not advance on every one of these frames; see [`letter_step`].
+pub const HIGHLIGHT_STEP_MS: u128 = 100;
+
+/// Frames of [`highlight_tick`] that one letter stays put. The bar still
+/// repaints on every frame. Two frames is half the previous walk speed.
+pub const LETTER_HOLD_FRAMES: usize = 2;
+
+/// Tick at `now`. Steps once per [`HIGHLIGHT_STEP_MS`]. This is the
+/// repaint clock. The walk uses [`letter_step`].
+pub fn highlight_tick(now: std::time::SystemTime) -> usize {
+    let ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (ms / HIGHLIGHT_STEP_MS) as usize
 }
 
-/// Columns a mark occupies in a label, including the separating space.
-pub fn mark_columns(activity: Option<AgentActivity>) -> usize {
-    match activity {
-        Some(_) => 2,
-        None => 0,
-    }
+/// Which step of the letter walk `tick` is on. Holds for
+/// [`LETTER_HOLD_FRAMES`] repaint frames, then advances.
+pub fn letter_step(tick: usize) -> usize {
+    tick / LETTER_HOLD_FRAMES
 }
 
-/// `▶ name` when `activity` is set, otherwise `name` unchanged.
-pub fn prefix_name(name: &str, activity: Option<AgentActivity>) -> String {
-    match activity {
-        Some(state) => format!("{} {name}", mark(Some(state))),
-        None => name.to_string(),
+/// Which character of `name` to color at `tick`. `None` when `name` is empty.
+pub fn highlighted_char(name: &str, tick: usize) -> Option<usize> {
+    let n = name.chars().count();
+    if n == 0 {
+        None
+    } else {
+        Some(letter_step(tick) % n)
     }
 }
 
@@ -216,6 +226,22 @@ mod tests {
     fn legacy_dot_prefix_needs_the_name() {
         assert_eq!(classify_title(". cargo test"), None);
         assert_eq!(classify_title("* just a note"), None);
+    }
+
+    #[test]
+    fn the_highlight_walks_the_name_and_wraps() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(highlight_tick(UNIX_EPOCH), 0);
+        assert_eq!(highlight_tick(UNIX_EPOCH + Duration::from_millis(100)), 1);
+        assert_eq!(highlight_tick(UNIX_EPOCH + Duration::from_millis(250)), 2);
+        // The repaint clock still steps every 100ms. The letter holds
+        // for two of those frames, then advances, and wraps.
+        assert_eq!(highlighted_char("work", 0), Some(0));
+        assert_eq!(highlighted_char("work", 1), Some(0));
+        assert_eq!(highlighted_char("work", 2), Some(1));
+        assert_eq!(highlighted_char("work", 3), Some(1));
+        assert_eq!(highlighted_char("work", 8), Some(0));
+        assert_eq!(highlighted_char("", 3), None);
     }
 
     #[test]

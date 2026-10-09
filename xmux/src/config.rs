@@ -7,6 +7,7 @@
 //!   alt+g: lazygit
 //! keybindings:
 //!   session-manager: ctrl+o
+//!   next-finished: ctrl+a
 //!   split-vertical: alt+v
 //! sessions:
 //!   1: { name: meow, key: F1 }
@@ -60,6 +61,11 @@ pub struct Config {
     /// UI accent color (`accent: "#7aa2f7"`); defaults to the terminal
     /// palette's cyan so it follows the theme.
     pub accent: Color,
+    /// Color for a working session name (one letter at a time) and the
+    /// background of a session chip after that session's agent finishes
+    /// a turn (`agent_color_highlight: "#a855f7"`), until the session is
+    /// viewed. Defaults to this purple when the key is absent.
+    pub agent_color_highlight: Color,
     /// Environment variables set in every spawned shell
     /// (`terminal_envs:`). Defaults to just `TERM=xterm-256color` when
     /// the section is absent; when present, it is used exactly as given.
@@ -76,17 +82,14 @@ pub struct Config {
     /// Mouse select-to-copy (`select_copy: true`): drag selects text in
     /// a pane, releasing copies it to the client's clipboard via OSC 52.
     pub select_copy: bool,
-    /// Tab bar at the top of the screen (`bar_position: top`) instead
-    /// of the default bottom.
+    /// Status bar at the top of the screen (`bar_position: top`) instead
+    /// of the default bottom. Sessions always sit on the left and tabs
+    /// on the right; there is no alignment setting.
     pub bar_top: bool,
-    /// Agent bar at the top of the screen (`agent_bar_position: top`)
-    /// instead of the default bottom. The bar lists every session that
-    /// has a working or idle agent and hides when none do.
-    pub agent_bar_top: bool,
 }
 
 /// The server's controls: config name, default key, action.
-const ACTIONS: [(&str, &str, InputAction); 12] = [
+const ACTIONS: [(&str, &str, InputAction); 13] = [
     (
         "session-manager",
         "ctrl+o",
@@ -96,6 +99,7 @@ const ACTIONS: [(&str, &str, InputAction); 12] = [
     ("split-horizontal", "ctrl+k", InputAction::SplitH),
     ("split-vertical", "ctrl+l", InputAction::SplitV),
     ("focus-next", "ctrl+t", InputAction::FocusNext),
+    ("next-finished", "ctrl+a", InputAction::NextFinished),
     ("focus-left", "ctrl+q", InputAction::FocusDir(NavDir::Left)),
     (
         "focus-right",
@@ -127,6 +131,21 @@ struct RawConfig {
     #[serde(default)]
     accent: Option<String>,
     #[serde(default)]
+    agent_color_highlight: Option<String>,
+    /// Obsolete name of [`agent_color_highlight`](Self::agent_color_highlight).
+    /// Accepted so a config written before the rename still loads. The
+    /// new key wins when both are set.
+    #[serde(default)]
+    agent_finished: Option<String>,
+    /// Obsolete. Accepted so a config written while the working symbol
+    /// was a setting still loads.
+    #[serde(default)]
+    agent_working: Option<String>,
+    /// Obsolete. Finished sessions use the highlight color as a chip
+    /// background. Accepted so older configs still load.
+    #[serde(default)]
+    agent_finished_symbol: Option<String>,
+    #[serde(default)]
     terminal_envs: Option<HashMap<String, String>>,
     #[serde(default)]
     shell: Option<String>,
@@ -138,8 +157,17 @@ struct RawConfig {
     select_copy: Option<bool>,
     #[serde(default)]
     bar_position: Option<String>,
+    /// Obsolete. Sessions are always on the left and tabs on the right.
+    /// Accepted so a config written while alignment was a setting still
+    /// loads.
+    #[serde(default)]
+    bar_alignment: Option<String>,
+    /// Obsolete separate agent bar. Accepted so older config files
+    /// still load; the session chips on the status bar replaced it.
     #[serde(default)]
     agent_bar_position: Option<String>,
+    #[serde(default)]
+    agent_bar_alignment: Option<String>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -162,20 +190,31 @@ pub fn load() -> Result<Config, String> {
             keybindings: HashMap::new(),
             sessions: HashMap::new(),
             accent: None,
+            agent_color_highlight: None,
+            agent_finished: None,
+            agent_working: None,
+            agent_finished_symbol: None,
             terminal_envs: None,
             shell: None,
             start_dir: None,
             scrollback_lines: None,
             select_copy: None,
             bar_position: None,
+            bar_alignment: None,
             agent_bar_position: None,
+            agent_bar_alignment: None,
         },
     };
 
     let accent = match &raw.accent {
-        Some(spec) => parse_accent(spec)?,
+        Some(spec) => parse_color(spec, "accent")?,
         None => Color::Cyan,
     };
+    let agent_color_highlight = agent_highlight_color(&raw)?;
+    // Old mark keys are ignored. Mentioning them keeps
+    // `deny_unknown_fields` from rejecting a config that still has them.
+    let _ = raw.agent_working;
+    let _ = raw.agent_finished_symbol;
 
     let envs: Vec<(String, String)> = match raw.terminal_envs {
         Some(map) => {
@@ -307,25 +346,26 @@ pub fn load() -> Result<Config, String> {
         None => 5000,
     };
 
-    // Absent means bottom for both bars, matching the shipped default.
+    // Absent means the bottom edge.
     let bar_top = parse_edge(raw.bar_position.as_deref(), false, "bar_position")?;
-    let agent_bar_top = parse_edge(
-        raw.agent_bar_position.as_deref(),
-        false,
-        "agent_bar_position",
-    )?;
+    // Obsolete keys. Mentioning them keeps `deny_unknown_fields` from
+    // rejecting a config written when alignment was a setting, or when
+    // the agent bar was separate.
+    let _ = raw.bar_alignment;
+    let _ = raw.agent_bar_position;
+    let _ = raw.agent_bar_alignment;
 
     Ok(Config {
         bindings,
         pins,
         accent,
+        agent_color_highlight,
         envs,
         shell,
         start_dir,
         scrollback_lines,
         select_copy: raw.select_copy.unwrap_or(true),
         bar_top,
-        agent_bar_top,
     })
 }
 
@@ -341,8 +381,30 @@ fn parse_edge(value: Option<&str>, default_top: bool, field: &str) -> Result<boo
     }
 }
 
+/// `agent_color_highlight`, or the old `agent_finished` key when the new
+/// one is absent. Neither key uses the shipped purple.
+fn agent_highlight_color(raw: &RawConfig) -> Result<Color, String> {
+    if let Some(spec) = &raw.agent_color_highlight {
+        parse_color(spec, "agent_color_highlight")
+    } else if let Some(spec) = &raw.agent_finished {
+        parse_color(spec, "agent_finished")
+    } else {
+        Ok(default_agent_color_highlight())
+    }
+}
+
+/// Purple used when no highlight color is configured. Matches the hex
+/// shipped in the default config.
+fn default_agent_color_highlight() -> Color {
+    Color::Rgb {
+        r: 0xa8,
+        g: 0x55,
+        b: 0xf7,
+    }
+}
+
 /// Parse `#rrggbb` (or shorthand `#rgb`) into an RGB color.
-fn parse_accent(spec: &str) -> Result<Color, String> {
+fn parse_color(spec: &str, field: &str) -> Result<Color, String> {
     let hex = spec.trim().trim_start_matches('#');
     let expand = |h: &str| -> Option<(u8, u8, u8)> {
         let full: String = match h.len() {
@@ -356,7 +418,7 @@ fn parse_accent(spec: &str) -> Result<Color, String> {
     match expand(hex) {
         Some((r, g, b)) => Ok(Color::Rgb { r, g, b }),
         None => Err(format!(
-            "invalid accent \"{spec}\" (expected hex like #7aa2f7)"
+            "invalid {field} \"{spec}\" (expected hex like #7aa2f7)"
         )),
     }
 }
@@ -513,5 +575,107 @@ mod tests {
             true
         );
         assert!(parse_edge(Some("left"), false, "agent_bar_position").is_err());
+    }
+
+    #[test]
+    fn colors_are_hex() {
+        assert_eq!(
+            parse_color("#7aa2f7", "accent").unwrap(),
+            Color::Rgb {
+                r: 0x7a,
+                g: 0xa2,
+                b: 0xf7
+            }
+        );
+        assert_eq!(
+            parse_color("#a5f", "agent_finished").unwrap(),
+            Color::Rgb {
+                r: 0xaa,
+                g: 0x55,
+                b: 0xff
+            }
+        );
+        let err = parse_color("purple", "agent_finished").unwrap_err();
+        assert!(err.contains("agent_finished"), "{err}");
+        assert!(err.contains("purple"), "{err}");
+    }
+
+    #[test]
+    fn agent_color_highlight_defaults_to_the_shipped_purple() {
+        assert_eq!(
+            default_agent_color_highlight(),
+            parse_color("#a855f7", "agent_color_highlight").unwrap()
+        );
+        assert!(DEFAULT_CONFIG.contains("agent_color_highlight: \"#a855f7\""));
+        assert!(!DEFAULT_CONFIG.contains("agent_finished"));
+    }
+
+    #[test]
+    fn the_old_agent_finished_key_still_supplies_the_color() {
+        let old = RawConfig {
+            commands: HashMap::new(),
+            keybindings: HashMap::new(),
+            sessions: HashMap::new(),
+            accent: None,
+            agent_color_highlight: None,
+            agent_finished: Some("#112233".into()),
+            agent_working: Some("?".into()),
+            agent_finished_symbol: Some("!".into()),
+            terminal_envs: None,
+            shell: None,
+            start_dir: None,
+            scrollback_lines: None,
+            select_copy: None,
+            bar_position: None,
+            bar_alignment: None,
+            agent_bar_position: None,
+            agent_bar_alignment: None,
+        };
+        assert_eq!(
+            agent_highlight_color(&old).unwrap(),
+            Color::Rgb {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33
+            }
+        );
+        let renamed = RawConfig {
+            agent_color_highlight: Some("#a855f7".into()),
+            agent_finished: Some("#112233".into()),
+            ..old
+        };
+        assert_eq!(
+            agent_highlight_color(&renamed).unwrap(),
+            default_agent_color_highlight()
+        );
+    }
+
+    #[test]
+    fn next_finished_defaults_to_ctrl_a() {
+        let (name, key, action) = ACTIONS
+            .iter()
+            .find(|(name, ..)| *name == "next-finished")
+            .expect("next-finished action");
+        assert_eq!(*name, "next-finished");
+        assert_eq!(*key, "ctrl+a");
+        assert!(matches!(action, InputAction::NextFinished));
+        assert!(DEFAULT_CONFIG.contains("next-finished: ctrl+a"));
+    }
+
+    #[test]
+    fn old_mark_keys_still_parse() {
+        let raw: RawConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        assert_eq!(raw.agent_working, None);
+        assert_eq!(raw.agent_finished_symbol, None);
+        assert_eq!(raw.agent_finished, None);
+        assert_eq!(raw.agent_color_highlight.as_deref(), Some("#a855f7"));
+        // Leftover mark keys still parse.
+        let old: RawConfig = serde_yaml::from_str(
+            "agent_working: \"?\"\nagent_finished_symbol: \"!\"\nagent_finished: \"#112233\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.agent_working.as_deref(), Some("?"));
+        assert_eq!(old.agent_finished_symbol.as_deref(), Some("!"));
+        assert_eq!(old.agent_finished.as_deref(), Some("#112233"));
     }
 }

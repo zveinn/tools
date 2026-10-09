@@ -21,94 +21,89 @@ use libghostty_vt::{
 use std::collections::HashMap;
 
 use crate::Result;
-use crate::agent_status::AgentActivity;
+use crate::agent_status::{AgentActivity, letter_step};
 use crate::model::{Layout, Rect, Session, SplitDir, split_rect};
 
-/// One session drawn on the agent bar.
-pub struct AgentBarItem {
-    /// Index into the server's session vec. Clicking the chip switches
-    /// to this session.
-    pub index: usize,
+/// One session drawn on the status bar.
+pub struct BarSession {
+    /// Index into the server's session vec when the session is running.
+    /// Clicking the chip switches to it.
+    pub index: Option<usize>,
+    /// Pin slot when this chip is a configured session. Clicking a chip
+    /// that is not running starts that pin.
+    pub pin: Option<usize>,
     pub name: String,
-    pub activity: AgentActivity,
+    pub activity: Option<AgentActivity>,
+    /// The session went working → idle and nobody is viewing it. Drawn
+    /// with the `agent_color_highlight` background instead of a dim chip.
+    pub finished: bool,
 }
 
-/// Where the tab bar, the agent bar, and the pane area sit on one
-/// client's screen.
+/// What a click on the status bar landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarHit {
+    /// A running session.
+    Session(usize),
+    /// A pinned session that is not running.
+    Pin(usize),
+    /// A tab of the session on screen.
+    Tab(usize),
+}
+
+/// Where the status bar and the pane area sit on one client's screen.
 ///
 /// `content` is the pane area's size (origin is always the pane area's
-/// own top-left; `content_y` is where that lands on the screen). Bars
-/// are screen rows.
+/// own top-left; `content_y` is where that lands on the screen). The
+/// bar is a contiguous run of screen rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chrome {
     pub content: (u16, u16),
     pub content_y: u16,
-    pub tab_row: Option<u16>,
-    pub agent_row: Option<u16>,
+    /// First screen row of the bar, when it is shown.
+    pub bar_row: Option<u16>,
+    pub bar_rows: u16,
 }
 
 /// Screen geometry for one client.
 ///
-/// The tab bar takes one row once the terminal is at least two rows
-/// tall. The agent bar takes a second row when `show_agents` is set
-/// and a content row would still remain; on a two-row screen the tab
-/// bar wins and the agent bar stays hidden. A bar on top shifts the
-/// pane area down. When both bars share an edge, the agent bar sits
-/// on the screen edge and the tab bar stays next to the panes.
-pub fn chrome(size: (u16, u16), tab_top: bool, agent_top: bool, show_agents: bool) -> Chrome {
+/// The status bar takes `bar_rows` once the terminal is at least two
+/// rows tall, and always leaves one row for the panes. A bar on top
+/// shifts the pane area down. `bar_rows` is the wrapped height the
+/// layout wants; this only places that block and caps it.
+pub fn chrome(size: (u16, u16), bar_top: bool, bar_rows: u16) -> Chrome {
     let (cols, rows) = size;
-    let tab = rows >= 2;
-    let agent = show_agents && rows >= 3;
-
-    let mut tab_row = None;
-    let mut agent_row = None;
-
-    // Top edge, outer row first so a shared edge puts the agent bar
-    // on row 0 and the tab bar beside the panes.
-    let mut next_top = 0u16;
-    if agent && agent_top {
-        agent_row = Some(next_top);
-        next_top += 1;
+    let n = if rows < 2 { 0 } else { bar_rows.min(rows - 1) };
+    if n == 0 {
+        return Chrome {
+            content: size,
+            content_y: 0,
+            bar_row: None,
+            bar_rows: 0,
+        };
     }
-    if tab && tab_top {
-        tab_row = Some(next_top);
-        next_top += 1;
-    }
-
-    // Bottom edge, outer row first: the agent bar is the last row,
-    // the tab bar the one above it.
-    let agent_bottom = agent && !agent_top;
-    let tab_bottom = tab && !tab_top;
-    if agent_bottom {
-        agent_row = Some(rows - 1);
-    }
-    if tab_bottom {
-        tab_row = Some(rows - 1 - u16::from(agent_bottom));
-    }
-
-    let chrome_rows = u16::from(tab) + u16::from(agent);
-    Chrome {
-        content: (cols, rows.saturating_sub(chrome_rows)),
-        content_y: next_top,
-        tab_row,
-        agent_row,
+    if bar_top {
+        Chrome {
+            content: (cols, rows - n),
+            content_y: n,
+            bar_row: Some(0),
+            bar_rows: n,
+        }
+    } else {
+        Chrome {
+            content: (cols, rows - n),
+            content_y: 0,
+            bar_row: Some(rows - n),
+            bar_rows: n,
+        }
     }
 }
 
-/// The pane area of a client screen: everything except the tab bar and,
-/// when `show_agents` is set, the agent bar. Sessions are laid out and
-/// shells sized to this, so it must be used for split/navigation
-/// geometry too. Which edge a bar sits on changes the pane origin, not
-/// this size.
-pub fn content_size(size: (u16, u16), show_agents: bool) -> (u16, u16) {
-    chrome(size, false, false, show_agents).content
-}
-
-/// Whether any session has an agent at work or waiting at its prompt.
-/// The agent bar is shown exactly when this is true (and the screen
-/// has room for it).
-pub fn any_agent(sessions: &[Session]) -> bool {
-    sessions.iter().any(|s| s.agent_activity().is_some())
+/// The pane area of a client screen: everything except `bar_rows` of
+/// status bar. Sessions are laid out and shells sized to this, so it
+/// must be used for split and navigation geometry too. Which edge the
+/// bar sits on changes the pane origin, not this size.
+pub fn content_size(size: (u16, u16), bar_rows: u16) -> (u16, u16) {
+    chrome(size, false, bar_rows).content
 }
 
 /// Truncate to `max` display characters, ellipsized.
@@ -121,8 +116,8 @@ fn fit(s: &str, max: usize) -> String {
 }
 
 /// Draw one frame of the viewed session: the active tab's panes at their
-/// rectangles, dim divider lines between them, the tab bar, the agent
-/// bar when `agents` is non-empty, and the focused pane's cursor.
+/// rectangles, dim divider lines between them, the status bar, and the
+/// focused pane's cursor.
 ///
 /// `full` repaints every cell instead of only the rows the panes marked
 /// dirty. The caller sets it when something outside the panes owns what
@@ -131,17 +126,19 @@ fn fit(s: &str, max: usize) -> String {
 pub fn draw_session(
     renderer: &mut Renderer<'static>,
     session: &Session,
-    agents: &[AgentBarItem],
+    bar_sessions: &[BarSession],
     active: usize,
     out: &mut impl Write,
     size: (u16, u16),
     accent: Color,
-    tab_top: bool,
-    agent_top: bool,
+    agent_color_highlight: Color,
+    tick: usize,
+    bar_top: bool,
     synchronized: bool,
     full: bool,
 ) -> Result<()> {
-    let screen = chrome(size, tab_top, agent_top, !agents.is_empty());
+    let layout = bar_layout(bar_sessions, session, size.0, size.1);
+    let screen = chrome(size, bar_top, layout.rows);
     let area = Rect {
         x: 0,
         y: screen.content_y,
@@ -181,11 +178,18 @@ pub fn draw_session(
         draw_dividers(out, &tab.layout, area, focus_rect, accent)?;
     }
 
-    if let Some(row) = screen.tab_row {
-        draw_tab_bar(out, session, size.0, accent, row)?;
-    }
-    if let Some(row) = screen.agent_row {
-        draw_agent_bar(out, agents, active, size.0, accent, row)?;
+    if let Some(origin) = screen.bar_row {
+        draw_bar(
+            out,
+            &layout,
+            bar_sessions,
+            active,
+            session.active_tab,
+            accent,
+            agent_color_highlight,
+            origin,
+            tick,
+        )?;
     }
 
     if let Some((x, y)) = cursor {
@@ -198,155 +202,485 @@ pub fn draw_session(
     Ok(())
 }
 
-/// The tab bar (top or bottom row): the session name as an accent chip,
-/// then the tabs — the open tab in accent, the rest dim. Segments past
-/// the right edge are dropped.
-fn draw_tab_bar(
-    out: &mut impl Write,
-    session: &Session,
-    cols: u16,
-    accent: Color,
+/// One chip after layout. `row` is relative to the top of the bar block.
+struct Placed {
+    kind: ChipKind,
+    label: String,
+    col: u16,
     row: u16,
-) -> Result<()> {
-    queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
-    let (chip, segments) = tab_bar_layout(session, cols);
-
-    // Session name as a chip: accent background, terminal-background
-    // text (accent foreground + reverse adapts to any theme).
-    if let Some(chip) = chip {
-        queue!(
-            out,
-            SetForegroundColor(accent),
-            SetAttribute(Attribute::Reverse),
-            Print(&chip),
-            SetAttribute(Attribute::Reset),
-        )?;
-    }
-
-    for (i, label, _) in &segments {
-        if *i == session.active_tab {
-            // Accent background chip: accent foreground + reverse gives
-            // accent-colored background with terminal-background text.
-            queue!(
-                out,
-                SetForegroundColor(accent),
-                SetAttribute(Attribute::Reverse),
-            )?;
-        } else {
-            queue!(out, SetAttribute(Attribute::Dim))?;
-        }
-        queue!(out, Print(label), SetAttribute(Attribute::Reset))?;
-    }
-    queue!(out, Clear(ClearType::UntilNewLine))?;
-    Ok(())
 }
 
-/// The tab bar's contents: the session chip (when it fits) and one
-/// `(tab index, label, start column)` per tab that fits on the row.
-/// Drawing and click hit-testing share this, so they cannot disagree
-/// about where a tab is.
-fn tab_bar_layout(session: &Session, cols: u16) -> (Option<String>, Vec<(usize, String, u16)>) {
+#[derive(Clone, Copy)]
+enum ChipKind {
+    Session {
+        index: Option<usize>,
+        pin: Option<usize>,
+    },
+    Tab(usize),
+}
+
+#[derive(Clone)]
+struct Chip {
+    kind: ChipKind,
+    label: String,
+}
+
+/// The status bar's chips. Drawing and click hit-testing share this, so
+/// they cannot disagree about where a session or a tab is.
+///
+/// Sessions sit on the left and tabs on the right of one row when both
+/// fit. When they would overlap, the tabs move up a line (and wrap
+/// upward, right-aligned, if they still do not fit) and the sessions
+/// stay below, left-aligned, wrapping onto further rows the same way.
+/// A chip wider than the screen is ellipsized so it still occupies one row.
+pub struct BarLayout {
+    chips: Vec<Placed>,
+    pub rows: u16,
+}
+
+pub fn bar_layout(
+    items: &[BarSession],
+    active: &Session,
+    cols: u16,
+    screen_rows: u16,
+) -> BarLayout {
     let cols = cols as usize;
-    // Session-wide mark: a working pane anywhere in the session, else an
-    // agent sitting at its prompt. Tabs below carry their own mark.
-    let chip = match crate::agent_status::mark(session.agent_activity()) {
-        "" => format!(" {} ", session.name),
-        mark => format!(" {mark} {} ", session.name),
-    };
-    let mut used = 0usize;
-    let chip = if chip.chars().count() <= cols {
-        used += chip.chars().count();
-        Some(chip)
+    let max_rows = if screen_rows < 2 {
+        0
     } else {
-        None
+        (screen_rows - 1) as usize
     };
-
-    let mut segments = Vec::new();
-    for (i, tab) in session.tabs.iter().enumerate() {
-        // A fullscreened tab advertises it in its label. An agent mark
-        // sits in front of the name so a background tab shows whether
-        // its agent is mid-turn or back at the prompt.
-        let name = crate::agent_status::prefix_name(&tab.name, tab.agent_activity());
-        let label = if tab.zoomed {
-            format!(" {name} [F] ")
-        } else {
-            format!(" {name} ")
+    if cols == 0 || max_rows == 0 {
+        return BarLayout {
+            chips: Vec::new(),
+            rows: 0,
         };
-        let width = label.chars().count();
-        if used + width > cols {
-            break;
-        }
-        segments.push((i, label, used as u16));
-        used += width;
     }
-    (chip, segments)
+
+    let sessions: Vec<Chip> = items
+        .iter()
+        .map(|item| Chip {
+            kind: ChipKind::Session {
+                index: item.index,
+                pin: item.pin,
+            },
+            label: clamp_label(session_chip_label(item), cols),
+        })
+        .filter(|chip| !chip.label.is_empty())
+        .collect();
+    let tabs: Vec<Chip> = active
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| Chip {
+            kind: ChipKind::Tab(i),
+            label: clamp_label(tab_chip_label(tab), cols),
+        })
+        .filter(|chip| !chip.label.is_empty())
+        .collect();
+
+    let session_width = width_of(&sessions);
+    let tab_width = width_of(&tabs);
+    let chips = if session_width + tab_width <= cols {
+        place_shared_row(&sessions, &tabs, cols)
+    } else if max_rows == 1 {
+        place_clipped_row(&sessions, &tabs, cols)
+    } else {
+        place_stacked(&sessions, &tabs, cols, max_rows)
+    };
+    let rows = chips
+        .iter()
+        .map(|chip| chip.row)
+        .max()
+        .map_or(0, |row| row + 1);
+    BarLayout { chips, rows }
 }
 
-/// The tab whose label covers column `x` of the tab bar, if any.
-pub fn tab_at(session: &Session, cols: u16, x: u16) -> Option<usize> {
-    tab_bar_layout(session, cols)
-        .1
-        .into_iter()
-        .find(|(_, label, start)| x >= *start && x < start + label.chars().count() as u16)
-        .map(|(i, _, _)| i)
-}
-
-/// The agent bar: one chip per session that has an agent, in session-list
-/// order. The session you're in is an accent chip, the same as the open
-/// tab; the rest are dim. Chips past the right edge are dropped.
-fn draw_agent_bar(
-    out: &mut impl Write,
-    items: &[AgentBarItem],
-    active: usize,
+/// The session or tab whose chip covers `(row, x)` of the bar block.
+pub fn bar_hit(
+    items: &[BarSession],
+    active: &Session,
     cols: u16,
-    accent: Color,
+    screen_rows: u16,
     row: u16,
-) -> Result<()> {
-    queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
-    for (index, label, _) in agent_bar_layout(items, cols) {
-        if index == active {
+    x: u16,
+) -> Option<BarHit> {
+    bar_layout(items, active, cols, screen_rows)
+        .chips
+        .into_iter()
+        .find(|chip| {
+            chip.row == row && x >= chip.col && (x - chip.col) < chip.label.chars().count() as u16
+        })
+        .and_then(|chip| match chip.kind {
+            ChipKind::Tab(i) => Some(BarHit::Tab(i)),
+            ChipKind::Session { index: Some(i), .. } => Some(BarHit::Session(i)),
+            ChipKind::Session { pin: Some(p), .. } => Some(BarHit::Pin(p)),
+            ChipKind::Session { .. } => None,
+        })
+}
+
+/// How a run of text is styled. A working session name paints one
+/// letter in the highlight color and then puts this style back.
+#[derive(Clone, Copy)]
+enum TextPaint {
+    /// Foreground `color` with reverse video, so the chip background is
+    /// that color.
+    Reverse(Color),
+    Dim,
+    /// Plain foreground, with optional bold and dim. Manager rows.
+    Fg {
+        color: Color,
+        bold: bool,
+        dim: bool,
+    },
+}
+
+fn apply_text_paint(out: &mut impl Write, paint: TextPaint) -> Result<()> {
+    match paint {
+        TextPaint::Reverse(color) => {
             queue!(
                 out,
-                SetForegroundColor(accent),
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(color),
                 SetAttribute(Attribute::Reverse),
             )?;
-        } else {
-            queue!(out, SetAttribute(Attribute::Dim))?;
         }
-        queue!(out, Print(label), SetAttribute(Attribute::Reset))?;
+        TextPaint::Dim => {
+            queue!(
+                out,
+                SetAttribute(Attribute::Reset),
+                SetAttribute(Attribute::Dim),
+            )?;
+        }
+        TextPaint::Fg { color, bold, dim } => {
+            queue!(
+                out,
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(color),
+            )?;
+            if bold {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+            if dim {
+                queue!(out, SetAttribute(Attribute::Dim))?;
+            }
+        }
     }
-    queue!(out, Clear(ClearType::UntilNewLine))?;
     Ok(())
 }
 
-/// `(session index, label, start column)` for each agent chip that fits.
-/// Drawing and click hit-testing share this, so they cannot disagree
-/// about where a session is.
-fn agent_bar_layout(items: &[AgentBarItem], cols: u16) -> Vec<(usize, String, u16)> {
-    let cols = cols as usize;
-    let mut used = 0usize;
-    let mut segments = Vec::new();
-    for item in items {
-        // Same label shape as a tab: the list's mark, then the name,
-        // padded like a tab chip.
-        let name = crate::agent_status::prefix_name(&item.name, Some(item.activity));
-        let label = format!(" {name} ");
-        let width = label.chars().count();
-        if used + width > cols {
-            break;
+/// Print `text`. When `lit` is a character index, that one character is
+/// drawn in `highlight` and the surrounding text keeps `paint`.
+///
+/// The lit cell keeps the chip's background. A reverse chip's background
+/// is its foreground color, so the letter sets that color explicitly:
+/// leaving reverse on would turn `highlight` into the background instead.
+fn print_with_lit(
+    out: &mut impl Write,
+    text: &str,
+    lit: Option<usize>,
+    highlight: Color,
+    paint: TextPaint,
+) -> Result<()> {
+    let Some(lit) = lit.filter(|i| text.chars().nth(*i).is_some()) else {
+        queue!(out, Print(text))?;
+        return Ok(());
+    };
+    let mut buf = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i == lit {
+            if !buf.is_empty() {
+                queue!(out, Print(&buf))?;
+                buf.clear();
+            }
+            queue!(out, SetAttribute(Attribute::Reset))?;
+            if let TextPaint::Reverse(bg) = paint {
+                queue!(out, SetBackgroundColor(bg))?;
+            }
+            queue!(out, SetForegroundColor(highlight), Print(ch))?;
+            apply_text_paint(out, paint)?;
+        } else {
+            buf.push(ch);
         }
-        segments.push((item.index, label, used as u16));
-        used += width;
     }
-    segments
+    if !buf.is_empty() {
+        queue!(out, Print(&buf))?;
+    }
+    Ok(())
 }
 
-/// The session whose agent-bar chip covers column `x`, if any.
-pub fn agent_at(items: &[AgentBarItem], cols: u16, x: u16) -> Option<usize> {
-    agent_bar_layout(items, cols)
-        .into_iter()
-        .find(|(_, label, start)| x >= *start && x < start + label.chars().count() as u16)
-        .map(|(index, _, _)| index)
+/// Index of the session-name character to light inside a chip label.
+/// The label is `" {name} "`, so the walk skips the padding and wraps
+/// across whatever of the name is still visible. A clamped label can
+/// lose the trailing space; that space is skipped only when it remains.
+fn working_lit(label: &str, tick: usize) -> Option<usize> {
+    let count = label.chars().count();
+    let start = usize::from(label.starts_with(' '));
+    let end = if label.ends_with(' ') {
+        count.saturating_sub(1)
+    } else {
+        count
+    };
+    let len = end.saturating_sub(start);
+    if len == 0 {
+        None
+    } else {
+        Some(start + letter_step(tick) % len)
+    }
+}
+
+/// Sessions on the left, tabs of the open session on the right. The
+/// open session and the open tab are accent chips. A session whose
+/// agent just finished a turn, and that is not the one on screen, uses
+/// `highlight` as its background. A working session lights one letter
+/// of its name in that same color, walking left to right.
+fn draw_bar(
+    out: &mut impl Write,
+    layout: &BarLayout,
+    items: &[BarSession],
+    active_session: usize,
+    active_tab: usize,
+    accent: Color,
+    highlight: Color,
+    origin: u16,
+    tick: usize,
+) -> Result<()> {
+    // Blank every row first. Chips are not always flush left, and a
+    // shared row has a gap in the middle, so clearing only up to the
+    // last chip would leave the previous frame in that gap.
+    for row in 0..layout.rows {
+        clear_bar_row(out, origin + row)?;
+    }
+    for chip in &layout.chips {
+        queue!(out, MoveTo(chip.col, origin + chip.row))?;
+        let (paint, working) = match chip.kind {
+            ChipKind::Session { index, .. } => {
+                let finished = index.is_some_and(|i| {
+                    items.iter().any(|item| {
+                        item.index == Some(i)
+                            && item.finished
+                            && item.activity == Some(AgentActivity::Idle)
+                    })
+                });
+                let working = index.is_some_and(|i| {
+                    items.iter().any(|item| {
+                        item.index == Some(i) && item.activity == Some(AgentActivity::Working)
+                    })
+                });
+                // The open session keeps the accent chip, so the bar
+                // still shows where you are. A just-finished session
+                // uses the same reverse trick — highlight foreground, so
+                // the background is that color and the text stays the
+                // terminal's own background.
+                let paint = if index == Some(active_session) {
+                    TextPaint::Reverse(accent)
+                } else if finished {
+                    TextPaint::Reverse(highlight)
+                } else {
+                    TextPaint::Dim
+                };
+                (paint, working)
+            }
+            ChipKind::Tab(i) => {
+                let paint = if i == active_tab {
+                    TextPaint::Reverse(accent)
+                } else {
+                    TextPaint::Dim
+                };
+                (paint, false)
+            }
+        };
+        apply_text_paint(out, paint)?;
+        let lit = working.then(|| working_lit(&chip.label, tick)).flatten();
+        print_with_lit(out, &chip.label, lit, highlight, paint)?;
+        queue!(out, SetAttribute(Attribute::Reset))?;
+    }
+    Ok(())
+}
+
+fn session_chip_label(item: &BarSession) -> String {
+    format!(" {} ", item.name)
+}
+
+fn tab_chip_label(tab: &crate::model::Tab) -> String {
+    // A fullscreened tab advertises it in its label.
+    if tab.zoomed {
+        format!(" {} [F] ", tab.name)
+    } else {
+        format!(" {} ", tab.name)
+    }
+}
+
+fn clamp_label(label: String, cols: usize) -> String {
+    if label.chars().count() <= cols {
+        label
+    } else {
+        fit(&label, cols)
+    }
+}
+
+fn width_of(chips: &[Chip]) -> usize {
+    chips.iter().map(|chip| chip.label.chars().count()).sum()
+}
+
+/// Both groups fit on one row: sessions flush left, tabs flush right.
+fn place_shared_row(sessions: &[Chip], tabs: &[Chip], cols: usize) -> Vec<Placed> {
+    let mut chips = place_run(sessions, 0, 0);
+    let tab_col = cols.saturating_sub(width_of(tabs)) as u16;
+    chips.extend(place_run(tabs, tab_col, 0));
+    chips
+}
+
+/// One row is all the screen will give. Keep chips from the front of
+/// each group and drop the ones that would overlap.
+fn place_clipped_row(sessions: &[Chip], tabs: &[Chip], cols: usize) -> Vec<Placed> {
+    let sessions = take_fitting(sessions, cols);
+    let tabs = take_fitting(tabs, cols.saturating_sub(width_of(&sessions)));
+    let mut chips = place_run(&sessions, 0, 0);
+    let tab_col = cols.saturating_sub(width_of(&tabs)) as u16;
+    chips.extend(place_run(&tabs, tab_col, 0));
+    chips
+}
+
+/// Tabs move up a line, right-aligned, and wrap upward if they still
+/// do not fit. Sessions stay on the rows below, left-aligned.
+fn place_stacked(sessions: &[Chip], tabs: &[Chip], cols: usize, max_rows: usize) -> Vec<Placed> {
+    let tab_need = row_count(tabs, cols);
+    let session_need = row_count(sessions, cols);
+    let (tab_rows, session_rows) = allocate_rows(tab_need, session_need, max_rows);
+    let mut chips = pack(tabs, cols, true, tab_rows, 0);
+    let session_base = chips
+        .iter()
+        .map(|chip| chip.row)
+        .max()
+        .map_or(0, |row| row + 1);
+    chips.extend(pack(sessions, cols, false, session_rows, session_base));
+    chips
+}
+
+/// Split `max_rows` between the two sides. Each side that has chips
+/// keeps a row when there are two or more rows to give.
+fn allocate_rows(tab_need: usize, session_need: usize, max_rows: usize) -> (usize, usize) {
+    if max_rows == 0 {
+        return (0, 0);
+    }
+    if tab_need + session_need <= max_rows {
+        return (tab_need, session_need);
+    }
+    if tab_need == 0 {
+        return (0, session_need.min(max_rows));
+    }
+    if session_need == 0 {
+        return (tab_need.min(max_rows), 0);
+    }
+    if max_rows == 1 {
+        return (1, 0);
+    }
+    let mut tabs = 1;
+    let mut sessions = 1;
+    let mut extra = max_rows - 2;
+    let tab_extra = tab_need.saturating_sub(1).min(extra);
+    tabs += tab_extra;
+    extra -= tab_extra;
+    sessions += session_need.saturating_sub(1).min(extra);
+    (tabs, sessions)
+}
+
+fn row_count(chips: &[Chip], cols: usize) -> usize {
+    pack(chips, cols, false, usize::MAX, 0)
+        .iter()
+        .map(|chip| chip.row)
+        .max()
+        .map_or(0, |row| row as usize + 1)
+}
+
+/// `right` packs each wrapped row against the right edge. Sessions pass
+/// `false` and stay on the left.
+fn pack(chips: &[Chip], cols: usize, right: bool, max_rows: usize, row_base: u16) -> Vec<Placed> {
+    if max_rows == 0 || cols == 0 {
+        return Vec::new();
+    }
+    let mut placed = Vec::new();
+    let mut current: Vec<Chip> = Vec::new();
+    let mut used = 0usize;
+    let mut rows = 0usize;
+    for chip in chips {
+        let w = chip.label.chars().count();
+        if w == 0 || w > cols {
+            continue;
+        }
+        if !current.is_empty() && used + w > cols {
+            placed.extend(place_row(&current, cols, right, row_base + rows as u16));
+            current.clear();
+            used = 0;
+            rows += 1;
+            if rows >= max_rows {
+                return placed;
+            }
+        }
+        used += w;
+        current.push(Chip {
+            kind: chip.kind,
+            label: chip.label.clone(),
+        });
+    }
+    if !current.is_empty() && rows < max_rows {
+        placed.extend(place_row(&current, cols, right, row_base + rows as u16));
+    }
+    placed
+}
+
+fn place_row(chips: &[Chip], cols: usize, right: bool, row: u16) -> Vec<Placed> {
+    let start = if right {
+        cols.saturating_sub(width_of(chips)) as u16
+    } else {
+        0
+    };
+    place_run(chips, start, row)
+}
+
+fn place_run(chips: &[Chip], start: u16, row: u16) -> Vec<Placed> {
+    let mut x = start;
+    let mut out = Vec::with_capacity(chips.len());
+    for chip in chips {
+        let w = chip.label.chars().count() as u16;
+        out.push(Placed {
+            kind: chip.kind,
+            label: chip.label.clone(),
+            col: x,
+            row,
+        });
+        x += w;
+    }
+    out
+}
+
+fn take_fitting(chips: &[Chip], cols: usize) -> Vec<Chip> {
+    let mut kept = Vec::new();
+    let mut used = 0usize;
+    for chip in chips {
+        let w = chip.label.chars().count();
+        if used + w > cols {
+            break;
+        }
+        used += w;
+        kept.push(Chip {
+            kind: chip.kind,
+            label: chip.label.clone(),
+        });
+    }
+    kept
+}
+
+/// Blank a bar row from column 0. The cursor stays on that column.
+fn clear_bar_row(out: &mut impl Write, row: u16) -> Result<()> {
+    queue!(
+        out,
+        MoveTo(0, row),
+        SetAttribute(Attribute::Reset),
+        Clear(ClearType::UntilNewLine),
+    )?;
+    Ok(())
 }
 
 // Line-component bits for box-drawing junction resolution.
@@ -536,8 +870,10 @@ pub struct ListItem {
     pub active: bool,
     /// Rendered dim (e.g. a pinned session that isn't running).
     pub dim: bool,
-    /// Agent activity drawn as a mark ahead of the label.
-    pub agent: Option<crate::agent_status::AgentActivity>,
+    /// Length of the session name at the start of `label` while its
+    /// agent is working. The highlight walks those characters and wraps.
+    /// `None` when this row is not a working session.
+    pub working_chars: Option<usize>,
 }
 
 /// A centered, rounded panel geometry for the overlays.
@@ -620,6 +956,9 @@ pub fn draw_manager(
     view: &ManagerView,
     size: (u16, u16),
     accent: Color,
+    highlight: Color,
+    tick: usize,
+    clear: bool,
 ) -> Result<()> {
     let ManagerView {
         title,
@@ -636,8 +975,13 @@ pub fn draw_manager(
         BeginSynchronizedUpdate,
         Hide,
         SetAttribute(Attribute::Reset),
-        Clear(ClearType::All),
     )?;
+    // A name-letter tick reprints the panel in place. The panel blanks
+    // its own rows, and the text does not change width, so skipping the
+    // screen clear keeps the menu from flashing on every frame.
+    if clear {
+        queue!(out, Clear(ClearType::All))?;
+    }
     // Window the list if the screen is short.
     let max_shown = (size.1.saturating_sub(6) as usize).max(1);
     let offset = (selected + 1).saturating_sub(max_shown);
@@ -645,7 +989,7 @@ pub fn draw_manager(
 
     let min_interior = items
         .iter()
-        .map(|i| i.label.chars().count() + 2 + crate::agent_status::mark_columns(i.agent))
+        .map(|i| i.label.chars().count() + 2)
         .chain([footer.chars().count(), min_interior])
         .max()
         .unwrap_or(0);
@@ -689,43 +1033,21 @@ pub fn draw_manager(
         }
         // The open session/tab is named in the accent color; the ❯
         // above marks where the cursor sits, so the two signals stay
-        // independent. A working agent takes the accent mark; a
-        // finished one stays dim so the busy rows are the ones that
-        // read as live.
-        let mark_cols = crate::agent_status::mark_columns(item.agent);
-        if let Some(state) = item.agent {
-            if state == crate::agent_status::AgentActivity::Working {
-                queue!(
-                    out,
-                    SetForegroundColor(accent),
-                    SetAttribute(Attribute::Bold)
-                )?;
-            } else if !is_selected {
-                queue!(out, SetAttribute(Attribute::Dim))?;
-            }
-            queue!(
-                out,
-                Print(crate::agent_status::mark(Some(state))),
-                Print(" "),
-                SetAttribute(Attribute::Reset),
-            )?;
-        }
+        // independent. A working session lights one letter of its name.
+        let paint = TextPaint::Fg {
+            color: if item.active { accent } else { Color::Reset },
+            bold: is_selected,
+            dim: item.dim && !is_selected,
+        };
+        apply_text_paint(out, paint)?;
+        let shown = fit(&item.label, panel.iw.saturating_sub(2));
+        let lit = item
+            .working_chars
+            .filter(|n| *n > 0)
+            .map(|n| letter_step(tick) % n);
+        print_with_lit(out, &shown, lit, highlight, paint)?;
         queue!(
             out,
-            SetForegroundColor(if item.active { accent } else { Color::Reset }),
-        )?;
-        if item.dim && !is_selected {
-            queue!(out, SetAttribute(Attribute::Dim))?;
-        }
-        if is_selected {
-            queue!(out, SetAttribute(Attribute::Bold))?;
-        }
-        queue!(
-            out,
-            Print(fit(
-                &item.label,
-                (panel.iw as usize).saturating_sub(2 + mark_cols),
-            )),
             SetAttribute(Attribute::Reset),
             SetForegroundColor(Color::Reset),
         )?;
@@ -1014,6 +1336,28 @@ mod tests {
     use super::*;
     use libghostty_vt::TerminalOptions;
 
+    /// Crossterm's color switch is process-global, and these tests run in
+    /// parallel. The lock is held until the previous setting is restored,
+    /// so one test cannot turn colors off while another is still drawing.
+    fn colors_on() -> ColorLock {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let prev = crossterm::style::Colored::ansi_color_disabled_memoized();
+        crossterm::style::Colored::set_ansi_color_disabled(false);
+        ColorLock { _lock: lock, prev }
+    }
+
+    struct ColorLock {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: bool,
+    }
+
+    impl Drop for ColorLock {
+        fn drop(&mut self) {
+            crossterm::style::Colored::set_ansi_color_disabled(self.prev);
+        }
+    }
+
     /// A pane that produced no output since the last frame reports
     /// nothing dirty, so an ordinary frame paints nothing at all. That is
     /// what left the manager's panel on screen after Esc: the overlay
@@ -1046,106 +1390,524 @@ mod tests {
         assert!(paint(true), "a full frame repaints it");
     }
 
-    fn chip(index: usize, name: &str, activity: AgentActivity) -> AgentBarItem {
-        AgentBarItem {
+    fn chip(
+        index: Option<usize>,
+        pin: Option<usize>,
+        name: &str,
+        activity: Option<AgentActivity>,
+        finished: bool,
+    ) -> BarSession {
+        BarSession {
             index,
+            pin,
             name: name.to_string(),
             activity,
+            finished,
         }
     }
 
-    #[test]
-    fn content_shrinks_only_while_an_agent_bar_is_shown() {
-        assert_eq!(content_size((80, 24), false), (80, 23));
-        assert_eq!(content_size((80, 24), true), (80, 22));
-        // Two rows: the tab bar keeps its row and the agent bar stays off.
-        assert_eq!(content_size((80, 2), true), (80, 1));
-        assert_eq!(content_size((80, 1), true), (80, 1));
+    fn running(
+        index: usize,
+        name: &str,
+        activity: Option<AgentActivity>,
+        finished: bool,
+    ) -> BarSession {
+        chip(Some(index), None, name, activity, finished)
+    }
+
+    fn laid_out(items: &[BarSession], session: &Session, cols: u16, rows: u16) -> BarLayout {
+        bar_layout(items, session, cols, rows)
+    }
+
+    fn hit(
+        items: &[BarSession],
+        session: &Session,
+        cols: u16,
+        rows: u16,
+        row: u16,
+        x: u16,
+    ) -> Option<BarHit> {
+        bar_hit(items, session, cols, rows, row, x)
+    }
+
+    fn view(name: &str, tabs: &[&str]) -> Session {
+        Session {
+            id: 1,
+            name: name.to_string(),
+            tabs: tabs
+                .iter()
+                .map(|name| crate::model::Tab {
+                    name: name.to_string(),
+                    layout: Layout::Empty,
+                    focused: 0,
+                    zoomed: false,
+                })
+                .collect(),
+            active_tab: 0,
+            agent: false,
+            last_activity: std::time::Instant::now(),
+            last_size: (80, 24),
+            last_agent_activity: None,
+            finished_unseen: false,
+        }
+    }
+
+    fn labels_on(layout: &BarLayout, row: u16) -> Vec<(String, u16)> {
+        layout
+            .chips
+            .iter()
+            .filter(|chip| chip.row == row)
+            .map(|chip| (chip.label.clone(), chip.col))
+            .collect()
     }
 
     #[test]
-    fn chrome_puts_a_lone_tab_bar_on_the_configured_edge() {
-        let bottom = chrome((80, 24), false, false, false);
-        assert_eq!(bottom.tab_row, Some(23));
-        assert_eq!(bottom.agent_row, None);
+    fn content_shrinks_by_the_bar_rows_and_keeps_one_pane_row() {
+        assert_eq!(content_size((80, 24), 1), (80, 23));
+        assert_eq!(content_size((80, 24), 3), (80, 21));
+        // Two rows: the bar keeps one and the panes keep the other.
+        assert_eq!(content_size((80, 2), 4), (80, 1));
+        assert_eq!(content_size((80, 1), 1), (80, 1));
+    }
+
+    #[test]
+    fn chrome_puts_the_bar_on_the_configured_edge() {
+        let bottom = chrome((80, 24), false, 1);
+        assert_eq!(bottom.bar_row, Some(23));
+        assert_eq!(bottom.bar_rows, 1);
         assert_eq!(bottom.content, (80, 23));
         assert_eq!(bottom.content_y, 0);
 
-        let top = chrome((80, 24), true, false, false);
-        assert_eq!(top.tab_row, Some(0));
+        let top = chrome((80, 24), true, 1);
+        assert_eq!(top.bar_row, Some(0));
+        assert_eq!(top.bar_rows, 1);
         assert_eq!(top.content_y, 1);
         assert_eq!(top.content, (80, 23));
+
+        // Wrapped bar: tabs occupy the upper row of the block, sessions
+        // the lower one. On the bottom edge that puts sessions on the
+        // last screen row; on the top edge, tabs are row 0.
+        let stacked_bottom = chrome((80, 24), false, 2);
+        assert_eq!(stacked_bottom.bar_row, Some(22));
+        assert_eq!(stacked_bottom.content, (80, 22));
+        assert_eq!(stacked_bottom.content_y, 0);
+
+        let stacked_top = chrome((80, 24), true, 2);
+        assert_eq!(stacked_top.bar_row, Some(0));
+        assert_eq!(stacked_top.bar_rows, 2);
+        assert_eq!(stacked_top.content_y, 2);
+        assert_eq!(stacked_top.content, (80, 22));
     }
 
     #[test]
-    fn chrome_stacks_the_agent_bar_on_the_outer_edge() {
-        let both_bottom = chrome((80, 24), false, false, true);
-        assert_eq!(both_bottom.tab_row, Some(22));
-        assert_eq!(both_bottom.agent_row, Some(23));
-        assert_eq!(both_bottom.content, (80, 22));
-        assert_eq!(both_bottom.content_y, 0);
-
-        let both_top = chrome((80, 24), true, true, true);
-        assert_eq!(both_top.agent_row, Some(0));
-        assert_eq!(both_top.tab_row, Some(1));
-        assert_eq!(both_top.content_y, 2);
-        assert_eq!(both_top.content, (80, 22));
-
-        let agent_top = chrome((80, 24), false, true, true);
-        assert_eq!(agent_top.agent_row, Some(0));
-        assert_eq!(agent_top.tab_row, Some(23));
-        assert_eq!(agent_top.content_y, 1);
-        assert_eq!(agent_top.content, (80, 22));
-
-        let agent_bottom = chrome((80, 24), true, false, true);
-        assert_eq!(agent_bottom.tab_row, Some(0));
-        assert_eq!(agent_bottom.agent_row, Some(23));
-        assert_eq!(agent_bottom.content_y, 1);
-        assert_eq!(agent_bottom.content, (80, 22));
+    fn shared_row_puts_sessions_left_and_tabs_right() {
+        // " work " is 6 columns, " shell " is 7. Together they fit in 20.
+        let items = vec![running(3, "work", None, false)];
+        let session = view("work", &["shell"]);
+        let layout = laid_out(&items, &session, 20, 24);
+        assert_eq!(layout.rows, 1);
+        assert_eq!(
+            labels_on(&layout, 0),
+            vec![(" work ".into(), 0), (" shell ".into(), 13)]
+        );
+        assert_eq!(
+            hit(&items, &session, 20, 24, 0, 0),
+            Some(BarHit::Session(3))
+        );
+        assert_eq!(
+            hit(&items, &session, 20, 24, 0, 5),
+            Some(BarHit::Session(3))
+        );
+        assert_eq!(hit(&items, &session, 20, 24, 0, 6), None);
+        assert_eq!(hit(&items, &session, 20, 24, 0, 13), Some(BarHit::Tab(0)));
+        assert_eq!(hit(&items, &session, 20, 24, 0, 19), Some(BarHit::Tab(0)));
+        assert_eq!(hit(&items, &session, 20, 24, 0, 20), None);
     }
 
     #[test]
-    fn agent_bar_labels_match_tabs_and_drop_what_does_not_fit() {
+    fn overlap_stacks_tabs_above_sessions() {
+        // " work " is 6 and " shell " is 7, which does not fit in 11. The
+        // tab moves up and stays on the right (11 - 7 = 4); the session
+        // stays on the left.
+        let items = vec![running(3, "work", None, false)];
+        let session = view("work", &["shell"]);
+        let layout = laid_out(&items, &session, 11, 24);
+        assert_eq!(layout.rows, 2);
+        assert_eq!(labels_on(&layout, 0), vec![(" shell ".into(), 4)]);
+        assert_eq!(labels_on(&layout, 1), vec![(" work ".into(), 0)]);
+        assert_eq!(hit(&items, &session, 11, 24, 0, 3), None);
+        assert_eq!(hit(&items, &session, 11, 24, 0, 4), Some(BarHit::Tab(0)));
+        assert_eq!(
+            hit(&items, &session, 11, 24, 1, 0),
+            Some(BarHit::Session(3))
+        );
+    }
+
+    #[test]
+    fn sessions_and_tabs_wrap_onto_extra_rows() {
+        // Session chips are 6 columns; tab chips are 7. Width 14 holds
+        // two of either. Three sessions and three tabs cannot share a
+        // row, so tabs wrap on top (2 rows) and sessions below (2 rows).
         let items = vec![
-            chip(3, "work", AgentActivity::Working),
-            chip(1, "notes", AgentActivity::Idle),
+            running(0, "work", None, false),
+            running(1, "meow", None, false),
+            running(2, "abcd", None, false),
         ];
-        // " ▶ work " is 8 columns, " ✓ notes " is 9.
-        let fit = agent_bar_layout(&items, 17);
-        assert_eq!(fit.len(), 2);
-        assert_eq!(fit[0].0, 3);
-        assert_eq!(fit[0].1, " ▶ work ");
-        assert_eq!(fit[0].2, 0);
-        assert_eq!(fit[1].1, " ✓ notes ");
-        assert_eq!(fit[1].2, 8);
-
-        assert_eq!(agent_bar_layout(&items, 8).len(), 1);
-        assert!(agent_bar_layout(&items, 7).is_empty());
-        assert_eq!(agent_at(&items, 17, 0), Some(3));
-        assert_eq!(agent_at(&items, 17, 7), Some(3));
-        assert_eq!(agent_at(&items, 17, 8), Some(1));
-        assert_eq!(agent_at(&items, 17, 16), Some(1));
-        assert_eq!(agent_at(&items, 17, 17), None);
+        let session = view("work", &["shell", "build", "tests"]);
+        let layout = laid_out(&items, &session, 14, 24);
+        assert_eq!(layout.rows, 4);
+        assert_eq!(
+            labels_on(&layout, 0),
+            vec![(" shell ".into(), 0), (" build ".into(), 7)]
+        );
+        // The leftover tab row is right-aligned: 14 - 7 = 7.
+        assert_eq!(labels_on(&layout, 1), vec![(" tests ".into(), 7)]);
+        assert_eq!(
+            labels_on(&layout, 2),
+            vec![(" work ".into(), 0), (" meow ".into(), 6)]
+        );
+        assert_eq!(labels_on(&layout, 3), vec![(" abcd ".into(), 0)]);
+        assert_eq!(hit(&items, &session, 14, 24, 1, 7), Some(BarHit::Tab(2)));
+        assert_eq!(
+            hit(&items, &session, 14, 24, 3, 0),
+            Some(BarHit::Session(2))
+        );
     }
 
     #[test]
-    fn agent_bar_uses_the_tab_bar_colors() {
+    fn a_short_screen_keeps_one_row_of_each_side() {
+        // Three sessions need two rows and three tabs need two, four in
+        // all. A 3-row screen can spare two bar rows, one per side, so
+        // the third chip of each side is dropped.
         let items = vec![
-            chip(0, "work", AgentActivity::Working),
-            chip(2, "notes", AgentActivity::Idle),
+            running(0, "work", None, false),
+            running(1, "meow", None, false),
+            running(2, "abcd", None, false),
         ];
+        let session = view("work", &["shell", "build", "tests"]);
+        let layout = laid_out(&items, &session, 14, 3);
+        assert_eq!(layout.rows, 2);
+        assert_eq!(
+            labels_on(&layout, 0),
+            vec![(" shell ".into(), 0), (" build ".into(), 7)]
+        );
+        assert_eq!(
+            labels_on(&layout, 1),
+            vec![(" work ".into(), 0), (" meow ".into(), 6)]
+        );
+        assert_eq!(hit(&items, &session, 14, 3, 0, 0), Some(BarHit::Tab(0)));
+        assert_eq!(hit(&items, &session, 14, 3, 1, 0), Some(BarHit::Session(0)));
+    }
+
+    #[test]
+    fn one_row_budget_clips_instead_of_overlapping() {
+        // " work " is 6, " shell " and " build " are 7. Width 16 holds the
+        // session and the first tab (6 + 7) and drops the second tab.
+        let items = vec![running(1, "work", None, false)];
+        let session = view("work", &["shell", "build"]);
+        let layout = laid_out(&items, &session, 16, 2);
+        assert_eq!(layout.rows, 1);
+        assert_eq!(
+            labels_on(&layout, 0),
+            vec![(" work ".into(), 0), (" shell ".into(), 9)]
+        );
+        assert_eq!(hit(&items, &session, 16, 2, 0, 9), Some(BarHit::Tab(0)));
+        assert_eq!(hit(&items, &session, 16, 2, 0, 8), None);
+    }
+
+    #[test]
+    fn a_chip_wider_than_the_screen_is_ellipsized() {
+        let items = vec![running(0, "workspace", None, false)];
+        let session = view("workspace", &["sh"]);
+        // " workspace " is 11 columns. Width 5 keeps an ellipsized chip
+        // on its own row, and the tab still gets the row above it,
+        // right-aligned: " sh " is 4 columns, so it starts at column 1.
+        let layout = laid_out(&items, &session, 5, 24);
+        assert_eq!(layout.rows, 2);
+        assert_eq!(labels_on(&layout, 0), vec![(" sh ".into(), 1)]);
+        let sessions = labels_on(&layout, 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].1, 0);
+        assert_eq!(sessions[0].0.chars().count(), 5);
+        assert!(sessions[0].0.contains('…'), "{sessions:?}");
+    }
+
+    #[test]
+    fn working_and_idle_sessions_keep_their_names() {
+        let items = vec![
+            running(0, "work", Some(AgentActivity::Working), false),
+            running(1, "notes", Some(AgentActivity::Idle), true),
+        ];
+        let session = view("work", &["shell"]);
+        // " work " is 6 columns, " notes " is 7. The activity does not
+        // change the label; the letter color is applied at paint time.
+        let laid = laid_out(&items, &session, 40, 24);
+        assert_eq!(laid.rows, 1);
+        assert_eq!(
+            labels_on(&laid, 0),
+            vec![
+                (" work ".into(), 0),
+                (" notes ".into(), 6),
+                (" shell ".into(), 33),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stopped_pin_is_clickable_and_a_running_pin_switches() {
+        let items = vec![
+            chip(None, Some(2), "meow", None, false),
+            chip(Some(4), Some(0), "work", None, false),
+        ];
+        let session = view("work", &["shell"]);
+        assert_eq!(hit(&items, &session, 40, 24, 0, 0), Some(BarHit::Pin(2)));
+        // " meow " is 6 columns, so the trailing space is still the pin
+        // and the running session starts at 6.
+        assert_eq!(hit(&items, &session, 40, 24, 0, 5), Some(BarHit::Pin(2)));
+        assert_eq!(
+            hit(&items, &session, 40, 24, 0, 6),
+            Some(BarHit::Session(4))
+        );
+    }
+
+    #[test]
+    fn the_bar_draws_the_tabs_on_the_right_after_clearing_the_row() {
+        let items = vec![running(0, "work", None, false)];
+        let session = view("work", &["shell"]);
+        // " shell " is 7 columns. Width 20 puts it at column 13:
+        // MoveTo(13, 5) is ESC[6;14H.
+        let layout = laid_out(&items, &session, 20, 24);
         let mut buf = Vec::new();
-        draw_agent_bar(&mut buf, &items, 0, 40, Color::Cyan, 5).unwrap();
+        draw_bar(
+            &mut buf,
+            &layout,
+            &items,
+            0,
+            0,
+            Color::Cyan,
+            Color::Magenta,
+            5,
+            0,
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains(" ▶ work "), "{text:?}");
-        assert!(text.contains(" ✓ notes "), "{text:?}");
-        // MoveTo(0, 5) is the 1-based sequence for that row.
-        assert!(text.contains("\u{1b}[6;1H"), "{text:?}");
-        let work = text.find(" ▶ work ").unwrap();
-        let notes = text.find(" ✓ notes ").unwrap();
-        // Accent reverse on the open session, dim on the other — the
-        // same attributes the tab bar uses for the open and resting tabs.
+        let clear = text.find("\u{1b}[K").expect(&text);
+        let jump = text.find("\u{1b}[6;14H").expect(&text);
+        let label = text.find(" shell ").expect(&text);
+        assert!(clear < jump && jump < label, "{text:?}");
+    }
+
+    #[test]
+    fn the_open_session_and_tab_use_the_accent_chip() {
+        let items = vec![
+            running(0, "work", Some(AgentActivity::Working), false),
+            running(2, "notes", Some(AgentActivity::Idle), false),
+        ];
+        let session = view("work", &["shell", "build"]);
+        let layout = laid_out(&items, &session, 80, 24);
+        let mut buf = Vec::new();
+        draw_bar(
+            &mut buf,
+            &layout,
+            &items,
+            0,
+            0,
+            Color::Cyan,
+            Color::Magenta,
+            5,
+            0,
+        )
+        .unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        // Tick 0 lights 'w', so the rest of the name is still one run.
+        assert!(text.contains("ork"), "{text:?}");
+        assert!(text.contains(" notes"), "{text:?}");
+        assert!(text.contains(" shell "), "{text:?}");
+        assert!(text.contains(" build "), "{text:?}");
+        let work = text.find("ork").unwrap();
+        let notes = text.find(" notes").unwrap();
+        let shell = text.find(" shell ").unwrap();
+        let build = text.find(" build ").unwrap();
         assert!(text[..work].contains("\u{1b}[7m"), "{text:?}");
         assert!(text[work..notes].contains("\u{1b}[2m"), "{text:?}");
+        assert!(text[notes..shell].contains("\u{1b}[7m"), "{text:?}");
+        assert!(text[shell..build].contains("\u{1b}[2m"), "{text:?}");
+    }
+
+    #[test]
+    fn a_finished_agent_uses_the_configured_background() {
+        // NO_COLOR makes crossterm drop color sequences.
+        let _colors = colors_on();
+        let purple = Color::Rgb {
+            r: 0xa8,
+            g: 0x55,
+            b: 0xf7,
+        };
+        let items = vec![
+            running(0, "work", Some(AgentActivity::Working), false),
+            running(2, "notes", Some(AgentActivity::Idle), true),
+            running(4, "shell", Some(AgentActivity::Idle), false),
+        ];
+        let session = view("work", &["sh"]);
+        let layout = laid_out(&items, &session, 80, 24);
+        let mut buf = Vec::new();
+        draw_bar(&mut buf, &layout, &items, 0, 0, Color::Cyan, purple, 5, 0).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        // Tick 0 lights 'w' of the open session. The finished and idle
+        // names stay one run each.
+        let work = text.find("ork").unwrap();
+        let notes = text.find(" notes").unwrap();
+        let shell = text.find(" shell").unwrap();
+        let rgb = "38;2;168;85;247";
+        // The open session stays an accent chip. Its lit letter is the
+        // highlight color, so purple shows up before the rest of the name.
+        assert!(text[..work].contains("\u{1b}[7m"), "{text:?}");
+        assert!(text[..work].contains(rgb), "{text:?}");
+        // A working → finished session is a purple reverse chip, not dim.
+        // The style is applied immediately before the label.
+        assert!(text[..notes].ends_with("\u{1b}[7m"), "{text:?}");
+        assert!(text[work..notes].contains(rgb), "{text:?}");
+        assert!(!text[work..notes].contains("\u{1b}[2m"), "{text:?}");
+        // Idle that never finished a turn stays dim.
+        assert!(text[notes..shell].contains("\u{1b}[2m"), "{text:?}");
+        assert!(!text[notes..shell].contains(rgb), "{text:?}");
+
+        // The session you are in keeps the accent chip even if its flag
+        // is still set, so the bar still shows where you are.
+        let open = vec![running(2, "notes", Some(AgentActivity::Idle), true)];
+        let session = view("notes", &["sh"]);
+        let layout = laid_out(&open, &session, 40, 24);
+        let mut buf = Vec::new();
+        draw_bar(&mut buf, &layout, &open, 2, 0, Color::Cyan, purple, 5, 0).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let notes = text.find(" notes").unwrap();
+        assert!(text[..notes].contains("\u{1b}[7m"), "{text:?}");
+        assert!(!text[..notes].contains(rgb), "{text:?}");
+    }
+
+    #[test]
+    fn a_name_tick_reprints_the_manager_without_clearing_the_screen() {
+        let _colors = colors_on();
+        let purple = Color::Rgb {
+            r: 0xa8,
+            g: 0x55,
+            b: 0xf7,
+        };
+        let items = vec![ListItem {
+            label: "build".into(),
+            active: false,
+            dim: false,
+            working_chars: Some("build".chars().count()),
+        }];
+        let view = ManagerView {
+            title: "sessions",
+            items: &items,
+            selected: 0,
+            footer: "esc close",
+            search: None,
+            search_cursor: 0,
+            min_rows: 1,
+            min_interior: 0,
+        };
+        let mut cleared = Vec::new();
+        draw_manager(&mut cleared, &view, (80, 24), Color::Cyan, purple, 0, true).unwrap();
+        let mut held = Vec::new();
+        draw_manager(&mut held, &view, (80, 24), Color::Cyan, purple, 1, false).unwrap();
+        let mut tick = Vec::new();
+        draw_manager(&mut tick, &view, (80, 24), Color::Cyan, purple, 2, false).unwrap();
+        let cleared = String::from_utf8(cleared).unwrap();
+        let held = String::from_utf8(held).unwrap();
+        let tick = String::from_utf8(tick).unwrap();
+        // Clear(All) is CSI 2 J. A letter tick must not wipe the screen.
+        assert!(cleared.contains("\u{1b}[2J"), "{cleared:?}");
+        assert!(!held.contains("\u{1b}[2J"), "{held:?}");
+        assert!(!tick.contains("\u{1b}[2J"), "{tick:?}");
+        let rgb = "38;2;168;85;247m";
+        let lit = |text: &str| text[text.find(rgb).unwrap() + rgb.len()..].chars().next();
+        // The letter holds for one frame, then advances.
+        assert_eq!(lit(&cleared), Some('b'), "{cleared:?}");
+        assert_eq!(lit(&held), Some('b'), "{held:?}");
+        assert_eq!(lit(&tick), Some('u'), "{tick:?}");
+    }
+
+    #[test]
+    fn a_working_session_lights_one_letter_then_wraps() {
+        let _colors = colors_on();
+        let purple = Color::Rgb {
+            r: 0xa8,
+            g: 0x55,
+            b: 0xf7,
+        };
+        let items = vec![running(1, "work", Some(AgentActivity::Working), false)];
+        let session = view("other", &["sh"]);
+        let layout = laid_out(&items, &session, 40, 24);
+        let rgb = "38;2;168;85;247m";
+        let lit_at = |tick: usize| {
+            let mut buf = Vec::new();
+            draw_bar(
+                &mut buf,
+                &layout,
+                &items,
+                0,
+                0,
+                Color::Cyan,
+                purple,
+                5,
+                tick,
+            )
+            .unwrap();
+            let text = String::from_utf8(buf).unwrap();
+            let i = text.find(rgb).expect(&text);
+            text[i + rgb.len()..].chars().next().unwrap()
+        };
+        // Two repaint frames per letter: half the previous walk speed.
+        assert_eq!(lit_at(0), 'w');
+        assert_eq!(lit_at(1), 'w');
+        assert_eq!(lit_at(2), 'o');
+        assert_eq!(lit_at(6), 'k');
+        assert_eq!(lit_at(8), 'w');
+    }
+
+    #[test]
+    fn a_lit_letter_keeps_the_chip_background() {
+        let _colors = colors_on();
+        let purple = Color::Rgb {
+            r: 0xa8,
+            g: 0x55,
+            b: 0xf7,
+        };
+        // Open session: reverse accent chip, so the background is cyan.
+        let items = vec![running(0, "work", Some(AgentActivity::Working), false)];
+        let session = view("work", &["sh"]);
+        let layout = laid_out(&items, &session, 40, 24);
+        let mut buf = Vec::new();
+        draw_bar(&mut buf, &layout, &items, 0, 0, Color::Cyan, purple, 5, 0).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let rgb = "\u{1b}[38;2;168;85;247m";
+        let at = text.find(rgb).expect(&text);
+        // The same cyan the chip uses as its reverse foreground
+        // (38;5;14) is set as this cell's background (48;5;14). Reverse
+        // is off for that cell so the purple stays the foreground.
+        let cell = &text[..at];
+        let reset = cell.rfind("\u{1b}[0m").expect(&text);
+        let lit_sgr = &cell[reset..];
+        assert!(lit_sgr.contains("\u{1b}[48;5;14m"), "{text:?}");
+        assert!(!lit_sgr.contains("\u{1b}[7m"), "{text:?}");
+        assert_eq!(text[at + rgb.len()..].chars().next(), Some('w'));
+
+        // A dim chip has no background of its own. The lit letter must
+        // not invent one. Index 1 is not the open session (0).
+        let items = vec![running(1, "work", Some(AgentActivity::Working), false)];
+        let session = view("other", &["sh"]);
+        let layout = laid_out(&items, &session, 40, 24);
+        let mut buf = Vec::new();
+        draw_bar(&mut buf, &layout, &items, 0, 0, Color::Cyan, purple, 5, 0).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let at = text.find(rgb).expect(&text);
+        let cell = &text[..at];
+        let reset = cell.rfind("\u{1b}[0m").expect(&text);
+        let lit_sgr = &cell[reset..];
+        assert!(!lit_sgr.contains("\u{1b}[4"), "{text:?}");
+        assert!(!lit_sgr.contains("\u{1b}[7m"), "{text:?}");
     }
 }

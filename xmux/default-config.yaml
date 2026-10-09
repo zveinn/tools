@@ -1,5 +1,9 @@
 accent: "#7aa2f7"
 
+# one letter of a working session name, then the chip background after
+# that agent finishes a turn, until you view the session
+agent_color_highlight: "#a855f7"
+
 shell: /usr/bin/bash
 
 # where new shells start; unset or empty = your home directory
@@ -14,14 +18,10 @@ scrollback_lines: 5000
 # over SSH when your terminal supports it)
 select_copy: true
 
-# tab bar position: bottom (default) or top
+# status bar position: bottom (default) or top.
+# sessions sit on the left, tabs of the active session on the right.
+# when the two would overlap, the tabs move up a line.
 bar_position: bottom
-
-# agent bar position: bottom (default) or top. The bar lists every
-# session that has a working (▶) or idle (✓) agent, and hides when
-# none do. On a shared edge it sits on the screen edge, with the tab
-# bar kept next to the panes.
-agent_bar_position: bottom
 
 terminal_envs:
   TERM: xterm-256color
@@ -36,6 +36,7 @@ keybindings:
   split-horizontal: ctrl+w
   split-vertical: ctrl+q
   focus-next: ctrl+t
+  next-finished: ctrl+a
   focus-left: ctrl+h
   focus-right: ctrl+l
   focus-up: ctrl+k

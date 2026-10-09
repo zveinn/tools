@@ -30,19 +30,25 @@ are normal sessions underneath. A ready-made Claude Code skill ships in
 
 ## Install
 
-Grab the latest Linux build for your architecture (`x86_64` or
-`aarch64`) from the
-[releases page](https://github.com/zveinn/xmux/releases) and put `xmux`
-on your PATH:
+Grab the latest Linux build (`amd64` or `arm64`) from the
+[zveinn/tools releases](https://github.com/zveinn/tools/releases). The
+assets are `xmux-<tag>-linux-amd64.tar.gz` and
+`xmux-<tag>-linux-arm64.tar.gz`:
 
 ```sh
-tar xzf xmux-v*-$(uname -m)-linux.tar.gz && cd xmux-v*-$(uname -m)-linux
+# arm64: same commands with linux-arm64 in the name
+tar xzf xmux-v*-linux-amd64.tar.gz && cd xmux-v*-linux-amd64
 sudo install -m755 xmux /usr/local/bin/
 ```
 
-Then run the server as a systemd system service — it starts at boot and
-survives SSH logouts, no linger tricks needed. The unit file ships in
-the tarball (and in this repo); set `User=` to your username first:
+Then run the server as a systemd system service. It starts at boot and
+survives SSH logouts. The unit file ships in the tarball and in this
+repo, and it needs two edits before it will start:
+
+- Set `User=` (it ships as `[YOUR_USER]`) to your username.
+- `ExecStart` ends in `--config [PATH_TO_CONFIG_DIR (optional)]`.
+  Delete that `--config` argument to use `~/.config/xmux`, or replace
+  the placeholder with a real directory.
 
 ```sh
 sudo cp xmux.service /etc/systemd/system/
@@ -50,13 +56,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xmux
 ```
 
-To build from source instead: `cargo install --path .` — needs Rust
-1.90+, plus [Zig](https://ziglang.org) and `git` on PATH
-(`libghostty-vt` compiles from Ghostty source).
+To build from source: `cargo install --path .`. That needs Rust 1.90+,
+Zig 0.15.2, and `git` on PATH. `libghostty-vt` compiles Ghostty from
+source, and the release build pins Zig 0.15.2 because that Ghostty
+tree rejects other Zig versions. Cargo installs the binary to
+`~/.cargo/bin`; the unit file runs `/usr/local/bin/xmux`, so copy it
+there or point `ExecStart` at the Cargo path.
 
 ```sh
 xmux a work    # attach to session "work", creating it if new
-xmux list      # sessions: tabs, panes, attach state, agent ages
+xmux list      # sessions, including stopped pins: tabs, panes, attach state, agent ages
 ```
 
 Detach with **Ctrl+G** (or drop the SSH connection — the session keeps
@@ -70,10 +79,16 @@ custom directory instead of `~/.config/xmux/`.
 `~/.config/xmux/config.yaml` — created from the built-in defaults on
 first run, and **hot-reloaded** within about a second of saving (a
 broken config is rejected and the old one stays active). Shown here
-with sample `start_dir` and `commands` values:
+with sample `start_dir`, `commands`, and `sessions`. A command chord
+has to be free: the same sequence bound twice (a command and a
+keybinding, or two commands) is rejected.
 
 ```yaml
 accent: "#7aa2f7"
+
+# one letter of a working session name, then the chip background after
+# that agent finishes a turn, until you view the session
+agent_color_highlight: "#a855f7"
 
 shell: /usr/bin/bash
 
@@ -86,20 +101,19 @@ scrollback_lines: 5000
 # mouse select-to-copy (clipboard via OSC 52, works over SSH)
 select_copy: true
 
-# tab bar position: bottom (default) or top
+# status bar position: bottom (default) or top.
+# sessions sit on the left, tabs of the active session on the right.
+# when the two would overlap, the tabs move up a line.
 bar_position: bottom
-
-# agent bar: bottom (default) or top. Sessions with a working (▶) or
-# idle (✓) agent; hidden when there are none.
-agent_bar_position: bottom
 
 terminal_envs:
   TERM: xterm-256color
 
-# chords that type a program + Enter into the focused pane
+# chords that type a program + Enter into the focused pane.
+# these must not reuse a keybinding (ctrl+h and ctrl+l move focus)
 commands:
-  ctrl+h: htop
-  ctrl+l: lazygit
+  alt+h: htop
+  alt+g: lazygit
 
 keybindings:
   session-manager: ctrl+o
@@ -107,6 +121,7 @@ keybindings:
   split-horizontal: ctrl+w
   split-vertical: ctrl+q
   focus-next: ctrl+t
+  next-finished: ctrl+a
   focus-left: ctrl+h
   focus-right: ctrl+l
   focus-up: ctrl+k
@@ -130,33 +145,34 @@ swallowed by xmux and never reach the inner shell.
 | Capability | Keys / command | Notes |
 |---|---|---|
 | Sessions | `xmux a <name>` | Created on first attach; survive disconnects; one client per session (a new attach kicks the old) |
-| Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | Always 50/50; the new shell opens in the directory of the pane it was split from; a pane's sibling takes its space when the shell exits |
-| Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip. The focused pane's frame is accent-colored with centered `▸◂▴▾` arrows pointing into it |
-| Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
-| Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000); the wheel scrolls the pane under the pointer, typing snaps back to live. Apps that track the mouse or run full-screen get the events instead |
-| Focus by mouse | click (any button) · scroll | Clicking or scrolling a pane focuses it, including panes running mouse-tracking apps — the click still reaches the app. Clicking a tab in the tab bar opens that tab |
-| Select to copy | drag | `select_copy:` (default on). Releasing copies the selection to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes — and clears the highlight. Panes tracking the mouse (vim, htop, lazygit) get the mouse instead |
+| Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | 50/50, with one divider cell between the panes. Ignored when the pane is under 5 rows (stacked) or 5 columns (side by side). The new shell opens in the directory of the pane it was split from. When a shell exits, its sibling takes its space; the last pane closes the tab, and the last tab closes the session |
+| Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip. Up and down stay in the tab. Dividers around the focused pane are accent-colored, with a centered `▸`, `◂`, `▾`, or `▴` on each shared edge pointing into the pane |
+| Next finished agent | `ctrl+a` | Jump to the next session created with `xmux agent` whose chip is highlighted: its agent just finished a turn and no client is looking at its panes. The same highlight also appears on a normal session when Grok or Claude inside it finishes a turn; `ctrl+a` only visits agent sessions. Walks the bar left to right and wraps. Nothing happens when no agent session is highlighted |
+| Fullscreen | `ctrl+f` | Focused pane takes the whole area; its tab chip shows `[F]` |
+| Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000, max 1000000). The wheel scrolls the pane under the pointer three lines; PageUp/PageDown scroll a page. Typing snaps back to the live end. An app that tracks the mouse gets the events in its own pane. A full-screen app that does not gets three arrow keys per wheel notch, and PageUp/PageDown as page keys |
+| Focus by mouse | click (any button) · scroll | Clicking or scrolling a pane focuses it, including panes running mouse-tracking apps — the click still reaches the app. Clicking a session chip switches to that session (a stopped pin starts); clicking a tab chip opens that tab |
+| Select to copy | drag | `select_copy:` (default on). Releasing a drag copies the selection to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes — and clears the highlight. A click without a drag only focuses the pane. Panes tracking the mouse (vim, htop, lazygit) get the mouse instead |
 | Mouse passthrough | automatic | Apps that track the mouse (lazygit, vim, htop) get events in their own pane-local coordinates, re-encoded into the protocol they asked for (SGR, X10, urxvt) and filtered to their tracking mode |
 | App clipboard | automatic | OSC 52 yanks from programs inside panes (helix `space+y`, vim) are forwarded to your local clipboard, clipboard/primary register preserved |
 | Theme-native colors | automatic | Palette-indexed colors and default fg/bg pass through to your terminal, so panes follow its theme; truecolor is preserved exactly |
-| Session manager | `ctrl+o` | `j/k` move · `enter` switch · `n` new · `r` rename · `x` kill · `/` search · `esc` close |
-| Text prompts | search, name, and settings fields | Full line editing: `←`/`→` move the caret, `Home`/`End`, `Delete`, `Backspace`, `ctrl+a`/`ctrl+e`/`ctrl+u`/`ctrl+w`; long text scrolls. `esc` cancels, `enter` accepts |
-| Agent list | `a` inside the session manager | Agent sessions only, most-recently-active first, with ages |
-| Tab manager | `ctrl+n` | Same controls as the session manager |
-| Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |
+| Session manager | `ctrl+o` | `j/k` or `↑/↓` move · `enter` switch · `n` new · `r` rename · `x` kill · `/` search · `esc`, `q`, or `ctrl+o` again close |
+| Text prompts | search, name, and settings fields | Full line editing: `←`/`→` move the caret, `Home`/`End`, `Delete`, `Backspace`, `ctrl+a`/`ctrl+e`/`ctrl+u`/`ctrl+w`; long text scrolls. `esc` cancels, `enter` accepts. In a prompt, `ctrl+a` moves to the start of the line and `ctrl+w` deletes a word |
+| Agent list | `a` inside the session manager | Toggles to agent sessions only, most-recently-active first, with ages (`5s`, `2m`, `1h`, `3d`). `n` there creates an agent session. `a` again returns to your sessions |
+| Tab manager | `ctrl+n` | Same controls as the session manager. `a` does nothing here |
+| Pinned sessions | `sessions:` in the config | The number is the slot: it orders the list, and gaps collapse. The key (an F-key, or any other chord) opens the session from anywhere, starting it if needed |
 | Commands | `commands:` in the config | The chord types `<program><Enter>` into the focused pane |
 | Shell | `shell:` in the config | Spawned in every pane; unset falls back to `$SHELL`, the passwd entry, then `/bin/sh` |
-| Shell environment | `terminal_envs:` in the config | Env vars for every spawned shell; default is exactly `TERM=xterm-256color` |
+| Shell environment | `terminal_envs:` in the config | Set on every spawned shell, on top of the server's own environment. Absent, the only added var is `TERM=xterm-256color`. A section you write is used as given, in place of that default |
 | Start directory | `start_dir:` in the config | Where new shells start; unset = your home directory |
-| Accent color | `accent:` in the config | Hex color for the focused-pane frame, tab chip, and selectors; unset follows your terminal palette's cyan |
+| Accent color | `accent:` in the config | Hex color for the focused pane's dividers, the open session and tab chips, and the manager selectors; unset follows your terminal palette's cyan |
+| Agent highlight | `agent_color_highlight:` in the config | While Grok or Claude is working in a session, one letter of that session's name is drawn in this color, walking from the first character and starting over at the end. After the turn finishes, the session chip uses this color as its background until a client is attached with the panes showing (an open menu does not clear it). Default `#a855f7`. The session on screen keeps the accent chip |
 | Rebindable keys | `keybindings:` in the config | Every control chord above can be remapped (`[ctrl+][alt+]<char>` or `F1`–`F12`); bound chords never reach the inner shell |
-| Tab bar position | `bar_position:` in the config | `bottom` (default) or `top`; applies live on config reload |
-| Agent bar | `agent_bar_position:` in the config | Every session that has a working (`▶`) or idle (`✓`) agent, drawn like a tab chip (accent on the session you're in, dim otherwise). `bottom` (default) or `top`. Hidden when no session has an agent, and a click switches to that session. On a shared edge it sits on the screen edge |
-| Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, keys, pins, `select_copy`, `bar_position`, and `agent_bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
-| Detach | `ctrl+g` | The session keeps running; reattach with `xmux a` |
-| State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/xmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
+| Status bar | `bar_position:` in the config | One bar. Sessions on the left (every session: pins, running, and agents), tabs of the active session on the right. The open session and the open tab are accent chips. A session where Grok or Claude is working lights one letter of its name at a time in `agent_color_highlight`, then starts over. A just-finished session takes that color as its chip background until a client is attached with the panes showing. `bar_position` is `bottom` (default) or `top`. When the two groups would overlap, the tabs move up a line and wrap, right-aligned, if they still do not fit; sessions stay below, left-aligned, and wrap the same way. A click still hits the chip under the pointer. Applies live on config reload |
+| Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, `agent_color_highlight`, keybindings, commands, pins, `select_copy`, and `bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
+| Detach | `ctrl+g` | The session keeps running; reattach with `xmux a <name>` |
+| State restore | automatic | Sessions, tabs, splits, each shell's directory, and any per-pane auto-run command are saved to `layout.json` next to the config every 10s, and again on SIGTERM, SIGINT, and SIGHUP. A server start recreates them as fresh shells in the saved directories (scrollback and running programs are gone; agent sessions are left out). A missing, empty, or invalid `layout.json` falls back to `layout.json.tmp`, then `layout.json.bak` |
 | Auto-run on restore | `ctrl+s` on a pane | Declare a command for the focused pane; it is typed into the restored shell after a server restart. Enter saves, empty clears, esc cancels |
-| Agent mode | `xmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
+| Agent mode | `xmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions. `new`, `send`, and `read` bump activity ordering |
 | Listing | `xmux list` | Colored on a tty, plain when piped (agents parse this) |
 
 ---
