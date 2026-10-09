@@ -61,7 +61,7 @@ pub enum InputAction {
     SplitV,
     /// Move focus to the next pane.
     FocusNext,
-    /// Jump to the next agent session highlighted as just-finished.
+    /// Jump to the next normal session highlighted as just-finished.
     NextFinished,
     /// Move focus directionally.
     FocusDir(NavDir),
@@ -131,12 +131,13 @@ pub fn bar_sessions(pins: &[Pin], sessions: &[Session]) -> Vec<crate::render::Ba
         .collect()
 }
 
-/// The next highlighted agent session after `active`, in status-bar
+/// The next highlighted normal session after `active`, in status-bar
 /// order, wrapping around.
 ///
-/// Highlighted means an agent session whose agent just finished a turn
-/// (`finished_unseen`): the bar paints that chip with the finished
-/// background. The session already on screen is not a candidate.
+/// Highlighted means `finished_unseen`: the bar paints that chip with
+/// the finished background after Grok or Claude finishes a turn. Only
+/// normal sessions qualify. Sessions created with `xmux agent` are
+/// left out of the walk, and so is the session already on screen.
 /// `None` when nothing qualifies.
 pub fn next_finished_agent(pins: &[Pin], sessions: &[Session], active: usize) -> Option<usize> {
     let mut order = Vec::new();
@@ -158,7 +159,7 @@ pub fn next_finished_agent(pins: &[Pin], sessions: &[Session], active: usize) ->
     (0..n).find_map(|step| {
         let index = order[(start + step) % n];
         let session = &sessions[index];
-        (session.agent && session.finished_unseen && index != active).then_some(index)
+        (!session.agent && session.finished_unseen && index != active).then_some(index)
     })
 }
 
@@ -1911,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn next_finished_walks_highlighted_agents_in_bar_order() {
+    fn next_finished_walks_highlighted_sessions_in_bar_order() {
         let pins = vec![Pin {
             name: "meow".to_string(),
         }];
@@ -1925,25 +1926,31 @@ mod tests {
             session("fresh", true, 1),
             session("idle", true, 30),
         ];
-        // A highlighted normal session is not a target.
-        sessions[1].finished_unseen = true;
-        sessions[2].finished_unseen = true;
-        sessions[4].finished_unseen = true;
+        // Normal sessions with the finished highlight are the targets.
+        // Highlighted agent sessions stay out of the walk.
+        sessions[1].finished_unseen = true; // work
+        sessions[2].finished_unseen = true; // build (agent)
+        sessions[3].finished_unseen = true; // notes
+        sessions[4].finished_unseen = true; // fresh (agent)
 
-        assert_eq!(next_finished_agent(&pins, &sessions, 0), Some(4)); // fresh
-        assert_eq!(next_finished_agent(&pins, &sessions, 4), Some(2)); // build
-        assert_eq!(next_finished_agent(&pins, &sessions, 2), Some(4)); // wrap
-        assert_eq!(next_finished_agent(&pins, &sessions, 3), Some(4)); // notes
-        assert_eq!(next_finished_agent(&pins, &sessions, 5), Some(4)); // idle
+        assert_eq!(next_finished_agent(&pins, &sessions, 0), Some(1)); // work
+        assert_eq!(next_finished_agent(&pins, &sessions, 1), Some(3)); // notes
+        assert_eq!(next_finished_agent(&pins, &sessions, 3), Some(1)); // wrap, skipping agents
+        assert_eq!(next_finished_agent(&pins, &sessions, 4), Some(1)); // fresh → work
+        assert_eq!(next_finished_agent(&pins, &sessions, 2), Some(1)); // build → work
+        assert_eq!(next_finished_agent(&pins, &sessions, 5), Some(1)); // idle → work
 
-        sessions[2].finished_unseen = false;
-        sessions[4].finished_unseen = false;
+        // Agent highlights alone are not targets.
+        sessions[1].finished_unseen = false;
+        sessions[3].finished_unseen = false;
         assert_eq!(next_finished_agent(&pins, &sessions, 0), None);
 
         // The session on screen is not a candidate, even while its
         // highlight is still set.
-        sessions[4].finished_unseen = true;
-        assert_eq!(next_finished_agent(&pins, &sessions, 4), None);
+        sessions[1].finished_unseen = true;
+        sessions[2].finished_unseen = false;
+        sessions[4].finished_unseen = false;
+        assert_eq!(next_finished_agent(&pins, &sessions, 1), None);
     }
 
     #[test]
